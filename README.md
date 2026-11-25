@@ -1,5 +1,9 @@
 # MediaShelf · 影视库整理
 
+[![Release](https://img.shields.io/github/v/release/szjmhxd/media-shelf?display_name=tag&sort=semver)](https://github.com/szjmhxd/media-shelf/releases/latest)
+[![Tests](https://github.com/szjmhxd/media-shelf/actions/workflows/test.yml/badge.svg)](https://github.com/szjmhxd/media-shelf/actions/workflows/test.yml)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-lightgrey)
+
 一个本地运行的桌面工具，把散乱的影视文件整理成媒体库能识别的结构：批量改名、按影片归档、写入或删除 nfo。所有操作在本地完成，只做同盘改名，不搬运数据。
 
 ![界面](docs/screenshot.png)
