@@ -7,11 +7,21 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+# Windows 下 GUI 进程（--windowed 打包后没有控制台）启动控制台子程序时，
+# 系统会给每个子进程新建一个可见的控制台窗口。扫描 50 个文件就是 50 次黑窗闪烁，
+# 界面看起来像在崩溃。CREATE_NO_WINDOW 让子进程静默运行。
+NO_WINDOW: dict[str, Any] = (
+    {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    if os.name == "nt"
+    else {}
+)
 
 AUDIO_RANK = {
     "truehd": 90,
@@ -178,7 +188,7 @@ def probe(path: str | Path, ffprobe: str, timeout: int = 60) -> ProbeResult:
         str(path),
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout, **NO_WINDOW)
     except subprocess.TimeoutExpired:
         result.error = f"读取超时（{timeout}s），文件可能损坏或网络盘太慢"
         return result

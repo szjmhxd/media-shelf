@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
@@ -29,35 +30,65 @@ class ScanWorker(QThread):
     row_ready = Signal(object)
     done = Signal(int)
 
-    def __init__(self, root: Path, ffprobe: str, recursive: bool = True) -> None:
+    def __init__(self, root: Path, ffprobe: str, recursive: bool = True, workers: int = 4) -> None:
         super().__init__()
         self.root = root
         self.ffprobe = ffprobe
         self.recursive = recursive
+        # NAS / 机械盘上并发 4 路通常比串行快 2~3 倍；再高会互相抢带宽
+        self.workers = max(1, min(int(workers or 4), 16))
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def _one(self, video: Path) -> dict | None:
+        if self._stop:  # 已请求停止：排队中的任务直接跳过，别让线程池拖着界面
+            return None
+        result = probe(video, self.ffprobe)
+        return {
+            "path": str(video),
+            "name": video.name,
+            "size": result.size,
+            "probe": result,
+            "meta": {},
+            "source": result.source_guess(),
+            "group": naming.detect_group(video.name) or naming.detect_group(video.parent.name),
+            "edition": naming.detect_edition(video.name),
+            "checked": True,
+            "status": "待识别" if not result.error else f"探测失败：{result.error}",
+            "target": "",
+        }
 
     def run(self) -> None:  # noqa: D102
         files = organizer.scan(self.root, recursive=self.recursive)
         total = len(files)
+        if not total:
+            self.done.emit(0)
+            return
+
         count = 0
-        for index, video in enumerate(files, start=1):
-            self.progress.emit(index, total, video.name)
-            result = probe(video, self.ffprobe)
-            record = {
-                "path": str(video),
-                "name": video.name,
-                "size": result.size,
-                "probe": result,
-                "meta": {},
-                "source": result.source_guess(),
-                "group": naming.detect_group(video.name) or naming.detect_group(video.parent.name),
-                "edition": naming.detect_edition(video.name),
-                "checked": True,
-                "status": "待识别" if not result.error else f"探测失败：{result.error}",
-                "target": "",
-            }
-            self.row_ready.emit(record)
-            count += 1
-        self.done.emit(count)
+        futures: list = []
+        pool = ThreadPoolExecutor(max_workers=self.workers)
+        try:
+            futures = [pool.submit(self._one, video) for video in files]
+            for future in as_completed(futures):
+                if self._stop:
+                    break
+                try:
+                    record = future.result()
+                except Exception:  # noqa: BLE001 - 单个文件异常不能中断整批
+                    continue
+                if not record:
+                    continue
+                count += 1
+                self.row_ready.emit(record)
+                self.progress.emit(count, total, record["name"])
+        finally:
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+            self.done.emit(count)
 
 
 class IdentifyWorker(QThread):

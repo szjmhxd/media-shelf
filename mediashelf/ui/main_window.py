@@ -289,7 +289,12 @@ class MainWindow(QMainWindow):
         self.log(f"开始扫描 {self.root}")
         self.progress.setRange(0, 0)
 
-        self.worker = ScanWorker(self.root, ffprobe, recursive=True)
+        self.worker = ScanWorker(
+            self.root,
+            ffprobe,
+            recursive=True,
+            workers=int(self.config.get("probe_workers", 4) or 4),
+        )
         self.worker.row_ready.connect(self._add_record)
         self.worker.progress.connect(self._on_progress)
         self.worker.done.connect(self._scan_done)

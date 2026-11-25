@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "MediaShelf"
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.1.2"
 
 # 目前默认使用的中英双语详细模板
 DEFAULT_TEMPLATE = "{cn}.{en}.{year}.{source}.{res}.{codec}.{hdr}.{audio}-{group}"
@@ -32,6 +32,8 @@ DEFAULTS: dict[str, Any] = {
     # v3 的 api_key 与 v4 的 Bearer Token 都支持，长度判断即可
     "language": "zh-CN",
     "ffprobe": "",
+    # 并发探测路数：NAS/机械盘 4 路最优，SSD 可调到 8
+    "probe_workers": 4,
     "template": DEFAULT_TEMPLATE,
     "folder_template": DEFAULT_FOLDER_TEMPLATE,
     "collection_suffix": "Collection",
