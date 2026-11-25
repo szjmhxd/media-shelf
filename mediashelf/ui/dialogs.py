@@ -325,6 +325,10 @@ class PreviewDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
+        # 路径很长，允许换行会把行高撑成两三行，一屏就看不了几部
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.ElideMiddle)
+        self.table.verticalHeader().setDefaultSectionSize(26)
         self._haystack: list[str] = []
 
         for index, row in enumerate(self.plan):
