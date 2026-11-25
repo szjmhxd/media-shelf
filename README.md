@@ -1,0 +1,148 @@
+# MediaShelf · 影视库整理
+
+一个本地运行的桌面工具，把散乱的影视文件整理成媒体库能识别的结构：批量改名、按影片归档、写入或删除 nfo。所有操作在本地完成，只做同盘改名，不搬运数据。
+
+![界面](docs/screenshot.png)
+
+## 它解决什么
+
+下载来的片名常常是三种体系混在一起：场景名（`Avatar.2009.2160p.BluRay.x265-DreamHD.mkv`）、站点头（`【高清影视之家发布】...`）、以及只有中文裸名（`沙丘2.mp4`）。这类文件直接丢进 Emby、Jellyfin、Kodi，轻则不显示海报，重则同一个系列被拆成七八个条目。
+
+MediaShelf 的做法是：先用 ffprobe 读出真实参数，再用 TMDB 查出中英文名与元数据，最后按你设置的规则渲染文件名。
+
+| 能力 | 说明 |
+|---|---|
+| 重命名 | 模板化命名，字段可插拔，实时预览新名字 |
+| 整理文件夹 | 按 `片名 (年份)` 归档，系列电影归入 `XXX Collection`，字幕跟随改名 |
+| 设置 / 删除 nfo | 生成 Kodi 标准 `movie.nfo`，可同步下载 poster / fanart；删除前默认备份 |
+| 撤销 | 每次执行写一份 CSV 日志，一键按日志反向还原 |
+
+## 安装
+
+需要 Python 3.9 以上，以及 ffmpeg（提供 ffprobe）。
+
+```bash
+git clone https://github.com/szjmhxd/media-shelf.git
+cd media-shelf
+pip install -r requirements.txt
+python run.py
+```
+
+Windows 上 ffmpeg 可以用 `winget install Gyan.FFmpeg`，程序也会自动探测常见安装路径；找不到时在「设置」里手动指定 `ffprobe.exe` 即可。
+
+## 快速开始
+
+1. 点「选择目录」，指向媒体库根目录（例如 `N:\电影`）。
+2. 点「扫描」，程序递归找出视频并逐个读取编码参数。55 个文件大约十几秒，取决于磁盘。
+3. 点「联网识别」，按目录名优先、文件名兜底的顺序提取查询词，去 TMDB 匹配。
+4. 检查表格中的「中文名 / 英文名 / 年份」，不准确的行选中后点「手动匹配」重新搜索。
+5. 点「预览并执行」，确认操作清单后执行。改名完成后可让媒体库刷新。
+
+表格中的中文名、英文名、年份、片源、发布组都可直接双击编辑，改完立刻反映到「新文件名」列。
+
+## 命名规则
+
+模板里用 `{字段}` 占位，分隔符自己定。默认模板：
+
+```
+{cn}.{en}.{year}.{source}.{res}.{codec}.{hdr}.{audio}-{group}
+```
+
+渲染结果：
+
+```
+阿凡达.Avatar.2009.BluRay.2160p.x265.10bit.DV.HDR.TrueHD.7.1.Atmos-DreamHD.mkv
+夺宝奇兵1：法柜奇兵.Indiana.Jones.and.the.Raiders.of.the.Lost.Ark.1981.BluRay.2160p.x265.10bit.DV.HDR.DTS-HD.MA.7.1-老K.mkv
+```
+
+| 字段 | 含义 | 来源 |
+|---|---|---|
+| `{cn}` | 中文片名 | TMDB `title`（zh-CN） |
+| `{en}` | 原始或英文片名 | TMDB `original_title`，非英文时取 alias 中的 US/GB 标题 |
+| `{year}` | 上映年份 | TMDB `release_date` |
+| `{res}` | 2160p / 1080p / 720p | ffprobe 实际宽高 |
+| `{source}` | BluRay / REMUX / WEB-DL / HDRip | 原文件名优先，缺失时按码率与体积推断 |
+| `{codec}` | x265.10bit / x264 / AV1 | ffprobe 编码与色深 |
+| `{hdr}` | DV.HDR / DV / HDR / HLG | ffprobe 色彩传输特性与 DOVI 侧数据 |
+| `{audio}` | TrueHD.7.1.Atmos / DTS-HD.MA.5.1 / DDP.5.1 | ffprobe 音轨，按规格取最佳一条 |
+| `{group}` | 发布组 | 文件名 `-` 之后的片段 |
+| `{edition}` | EXTENDED / PROPER / IMAX | 文件名中的版本标记 |
+| `{collection}` | 系列名 | TMDB `belongs_to_collection` |
+
+内置四套预设：媒体库简洁、中英双语详细、标准场景命名、仅英文。改过的模板会显示为「自定义」。
+
+归一化规则：空字段不会留下连续的点；中英文名相同时只保留一份；`:`、`/`、`*`、`?` 等非法字符会被替换；点分隔模板中标题内部的空格也转成点，避免 `Dune Part Two` 混进 `Dune.Part.Two` 的结构里。
+
+## 数据源
+
+| 数据源 | 需要 Key | 能拿到 | 适用 |
+|---|---|---|---|
+| TMDB | 是（免费） | 中英文名、年份、简介、评分、类型、导演、演员、TMDB/IMDb ID、海报、系列归属 | 推荐 |
+| 维基百科 | 否 | 中英文条目名、年份、简介 | 只想改名、或暂时没有 Key |
+
+TMDB 的免费 Key 申请：注册后进入 设置 → API → 申请开发者权限，通过后复制 v3 Key（32 位）或 v4 Read Access Token（`eyJ` 开头）。两种都能直接粘进「设置」，程序按前缀判断。
+
+未配置 Key 时，识别按钮仍然可用，走维基百科接口，但 nfo 里没有评分、演员表和 TMDB ID，海报也不会下载。
+
+**需要知道的限制**：TMDB 与维基百科都在境外，部分网络环境需要代理才能访问。程序对 `401 / 429 / 超时` 都有明确提示，失败只影响识别，不影响改名与整理。
+
+## nfo 说明
+
+生成的 `movie.nfo` 是 Kodi 标准格式，Jellyfin、Emby、Kodi 都能读：
+
+```xml
+<movie>
+  <title>阿凡达</title>
+  <originaltitle>Avatar</originaltitle>
+  <year>2009</year>
+  <tmdbid>19995</tmdbid>
+  <uniqueid type="tmdb" default="true">19995</uniqueid>
+  <plot>…</plot>
+  <art><poster>poster.jpg</poster><fanart>fanart.jpg</fanart></art>
+</movie>
+```
+
+图片写相对文件名，不用绝对路径。原因很实际：网上流传的 nfo 常把 `<poster>` 写成发布者自己 NAS 上的路径，换一台机器就全部失效。
+
+删除 nfo 时默认先复制到库根目录的 `_nfo_backup`，再删原文件；该目录不在媒体库扫描范围内。
+
+## 安全设计
+
+- **只改名，不复制**。全部走 `os.rename`，同盘是元数据操作，不占额外空间。跨设备会直接报错，不会退化成复制把磁盘写满。
+- **先预览后执行**。执行前弹出完整操作清单，逐条列出源路径与目标路径。
+- **可撤销**。每次执行写入 `执行日志_时间戳.csv`，菜单「工具 → 打开日志目录」可见；「撤销上次」按日志反向还原，并删除本次生成的 nfo 与图片。
+- **冲突不覆盖**。目标文件已存在时该条记为失败并跳过，不覆盖任何现有文件。
+
+## 已知限制
+
+- 片源（BluRay / WEB-DL / REMUX）无法从码流直接判断。原文件名里没有该信息时，程序按码率与体积推断，可能不准，可在表格里改。
+- 只处理电影。剧集需要按 `SxxExx` 编排，不在当前范围内。
+- ISO 与 BDMV 目录只识别外层文件，不会进入 `STREAM` 目录逐段处理。
+- 维基百科匹配对中文片名的准确率明显低于 TMDB，繁体条目需要人工核对。
+
+## 开发
+
+```
+mediashelf/
+├── config.py       配置与 ffprobe 探测
+├── probe.py        ffprobe 解析、HDR / 音轨判定
+├── naming.py       模板渲染、查询词提取、字段清洗
+├── tmdb.py         TMDB 接口（含缓存）
+├── wiki.py         维基百科兜底接口
+├── nfo.py          nfo 生成与删除
+├── organizer.py    扫描与整理计划
+├── apply.py        执行、日志、撤销
+└── ui/             PySide6 界面
+```
+
+核心逻辑不依赖 Qt，可以直接跑测试：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+13 项用例覆盖模板渲染、非法字符、查询词提取、nfo 结构与转义、计划生成、真实改名与撤销。CI 在 Python 3.11 / 3.12 / 3.13 上执行同一套用例。
+
+## 许可
+
+MIT

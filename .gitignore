@@ -1,0 +1,22 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# ---- 运行时产生 ----
+mediashelf/data/
+*.log
+执行日志_*.csv
+_nfo_backup/
+*.spec
+
+# ---- 编辑器 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

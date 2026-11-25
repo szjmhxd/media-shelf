@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mediashelf"
+version = "0.1.0"
+description = "影视库整理工具：模板化改名、按影片归档、生成或删除 nfo"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "szjmhxd" }]
+dependencies = ["PySide6>=6.6", "requests>=2.28"]
+
+[project.scripts]
+mediashelf = "mediashelf.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["mediashelf*"]
+
+[tool.setuptools.package-data]
+"mediashelf.ui" = ["*.qss"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
