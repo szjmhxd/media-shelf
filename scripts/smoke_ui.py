@@ -1,4 +1,5 @@
 """本地联调：不开窗也能验证界面与核心的接线。不参与 CI。"""
+
 from __future__ import annotations
 
 import os
@@ -27,9 +28,22 @@ def main() -> int:
     folder.mkdir()
     video = folder / "阿凡达.Avatar.2009.mkv"
     subprocess.run(
-        [str(ffmpeg), "-v", "error", "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=24",
-         "-t", "1", "-c:v", "libx264", str(video)],
-        check=True, capture_output=True,
+        [
+            str(ffmpeg),
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=1280x720:rate=24",
+            "-t",
+            "1",
+            "-c:v",
+            "libx264",
+            str(video),
+        ],
+        check=True,
+        capture_output=True,
     )
 
     app = QApplication([])

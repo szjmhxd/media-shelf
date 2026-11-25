@@ -13,7 +13,8 @@ mediashelf/data/
 *.log
 执行日志_*.csv
 _nfo_backup/
-*.spec
+assets/_preview.png
+scripts/version_info.txt
 
 # ---- 编辑器 ----
 .vscode/

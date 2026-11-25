@@ -19,6 +19,14 @@ MediaShelf 的做法是：先用 ffprobe 读出真实参数，再用 TMDB 查出
 
 ## 安装
 
+### 直接下载（推荐）
+
+到 [Releases](https://github.com/szjmhxd/media-shelf/releases) 下载 `MediaShelf.exe`，双击运行，不需要装 Python。
+
+单文件版首次启动要解压到临时目录，会卡 3～8 秒，之后就快了。程序会自己找 ffprobe（PATH、`C:\ffmpeg\bin`、`D:\environment\ffmpeg\bin` 等常见位置）；找不到时在「设置」里手动指定 `ffprobe.exe` 路径。ffmpeg 可以用 `winget install Gyan.FFmpeg` 安装。
+
+### 从源码运行
+
 需要 Python 3.9 以上，以及 ffmpeg（提供 ffprobe）。
 
 ```bash
@@ -142,6 +150,15 @@ python -m unittest discover -s tests -v
 ```
 
 13 项用例覆盖模板渲染、非法字符、查询词提取、nfo 结构与转义、计划生成、真实改名与撤销。CI 在 Python 3.11 / 3.12 / 3.13 上执行同一套用例。
+
+打包 Windows 单文件 exe：
+
+```bash
+pip install pyinstaller pillow
+python scripts/build.py        # 产出 dist/MediaShelf.exe
+```
+
+`scripts/build.py` 会读取 `config.py` 里的 `APP_VERSION` 生成 Windows 版本资源，再按 `media-shelf.spec` 裁剪 Qt 模块（去掉 WebEngine、Quick、Multimedia 等），把单文件体积压到 100 MB 以内。图标由 `scripts/make_icon.py` 生成，改配色直接改这个文件。
 
 ## 许可
 

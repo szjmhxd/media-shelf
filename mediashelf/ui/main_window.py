@@ -143,14 +143,16 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(COL_CHECK, QHeaderView.Fixed)
         self.table.setColumnWidth(COL_CHECK, 34)
         header.setSectionResizeMode(COL_FILE, QHeaderView.Interactive)
-        self.table.setColumnWidth(COL_FILE, 210)
+        self.table.setColumnWidth(COL_FILE, 168)
         header.setSectionResizeMode(COL_SIZE, QHeaderView.ResizeToContents)
-        for col in (COL_CN, COL_EN):
+        for col, width in ((COL_CN, 104), (COL_EN, 118)):
             header.setSectionResizeMode(col, QHeaderView.Fixed)
-            self.table.setColumnWidth(col, 128)
+            self.table.setColumnWidth(col, width)
         for col in (COL_YEAR, COL_SRC, COL_GROUP):
             header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        # 新文件名是主操作列，给足宽度；其余列压缩，避免 125% 缩放下被截断
         header.setSectionResizeMode(COL_NEW, QHeaderView.Stretch)
+        self.table.setMinimumWidth(720)
         header.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeToContents)
         self.table.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.table, 1)
