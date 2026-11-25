@@ -19,6 +19,8 @@ class Op:
     dst: str = ""
     note: str = ""
     payload: dict = field(default_factory=dict)
+    # 属于哪一个源视频。预览界面按它把同一部片的改名/nfo/图片合并成一行。
+    owner: str = ""
 
     def as_row(self) -> dict[str, str]:
         return {
@@ -132,14 +134,16 @@ def build_plan(
 
         key = str(target).lower()
         if key in taken:
-            ops.append(Op("move", str(video), "", f"跳过：与 {taken[key]} 目标同名"))
+            ops.append(
+                Op("move", str(video), "", f"跳过：与 {taken[key]} 目标同名", owner=str(video))
+            )
             record["status"] = "目标重名"
             continue
         taken[key] = str(video)
 
         note = "改名/归档" if has_meta else "改名/归档（未识别，片名取自文件名）"
         if str(video) != str(target):
-            ops.append(Op("move", str(video), str(target), note))
+            ops.append(Op("move", str(video), str(target), note, owner=str(video)))
             for extra in sidecars(video):
                 suffix = extra.name[len(video.stem) :]
                 ops.append(
@@ -148,6 +152,7 @@ def build_plan(
                         str(extra),
                         str(target_dir / f"{Path(filename).stem}{suffix}"),
                         "字幕跟随",
+                        owner=str(video),
                     )
                 )
 
@@ -159,16 +164,29 @@ def build_plan(
                     str(target_dir / nfo_mod.NFO_NAME),
                     f"{meta.get('cn') or meta.get('en')} ({meta.get('year', '')})",
                     {"meta": meta},
+                    owner=str(video),
                 )
             )
             if download_images:
                 if meta.get("poster"):
                     ops.append(
-                        Op("download", meta["poster"], str(target_dir / "poster.jpg"), "海报")
+                        Op(
+                            "download",
+                            meta["poster"],
+                            str(target_dir / "poster.jpg"),
+                            "海报",
+                            owner=str(video),
+                        )
                     )
                 if meta.get("backdrop"):
                     ops.append(
-                        Op("download", meta["backdrop"], str(target_dir / "fanart.jpg"), "背景图")
+                        Op(
+                            "download",
+                            meta["backdrop"],
+                            str(target_dir / "fanart.jpg"),
+                            "背景图",
+                            owner=str(video),
+                        )
                     )
 
     return ops

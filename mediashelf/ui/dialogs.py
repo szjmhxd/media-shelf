@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -25,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import config as cfg
-from ..organizer import Op, plan_summary
+from ..organizer import Op
 from ..tmdb import TMDBClient, test_key
 
 
@@ -240,37 +242,128 @@ class MatchDialog(QDialog):
         self.accept()
 
 
+def _merge_by_owner(ops: list[Op]) -> list[dict]:
+    """把一个文件的多个操作（改名、字幕、nfo、海报）合并成一条记录。
+
+    计划本身按操作为单位，执行时需要拆开；但人看的是"这部片会怎么处理"，
+    227 条操作摊成 227 行没法核对，合并后 44 行一眼扫完。
+    """
+    rows: dict[str, dict] = {}
+    order: list[str] = []
+    for op in ops:
+        key = op.owner or op.src or op.dst
+        row = rows.get(key)
+        if row is None:
+            row = rows[key] = {
+                "owner": key,
+                "name": Path(key).name if key else "",
+                "target": "",
+                "rename": False,
+                "sidecars": 0,
+                "nfo": False,
+                "poster": False,
+                "fanart": False,
+                "note": "",
+                "kinds": 0,
+            }
+            order.append(key)
+        row["kinds"] += 1
+        if op.kind == "move":
+            if not op.dst:
+                row["note"] = op.note or "跳过"
+            elif "字幕跟随" in op.note:
+                row["sidecars"] += 1
+            else:
+                row["rename"] = True
+                row["note"] = op.note
+                row["target"] = op.dst
+        elif op.kind == "write_nfo":
+            row["nfo"] = True
+            row["target"] = row["target"] or op.dst
+        elif op.kind == "download":
+            if op.note == "海报":
+                row["poster"] = True
+            elif op.note == "背景图":
+                row["fanart"] = True
+    return [rows[key] for key in order]
+
+
 class PreviewDialog(QDialog):
+    HEADERS = ["文件", "新文件名", "目标目录", "改名", "nfo", "海报", "背景", "备注"]
+
     def __init__(self, ops: list[Op], parent=None) -> None:
         super().__init__(parent)
         self.ops = ops
+        self.plan = _merge_by_owner(ops)
         self.setWindowTitle("执行计划预览")
-        self.resize(980, 560)
+        self.resize(1160, 640)
 
-        summary = plan_summary(ops)
-        label_text = (
-            "　".join(f"{_KIND.get(k, k)} {v} 条" for k, v in summary.items())
-            or "没有需要执行的操作"
-        )
-        label = QLabel(f"共 {len(ops)} 条操作：{label_text}")
+        renamed = sum(1 for row in self.plan if row["rename"])
+        nfo_count = sum(1 for row in self.plan if row["nfo"])
+        poster_count = sum(1 for row in self.plan if row["poster"])
+        skipped = sum(1 for row in self.plan if not row["rename"])
+
+        parts = [
+            f"{len(self.plan)} 个文件",
+            f"改名 {renamed}",
+            f"写 nfo {nfo_count}",
+            f"海报 {poster_count}",
+        ]
+        if skipped:
+            parts.append(f"不动 {skipped}")
+        label = QLabel("　·　".join(parts))
         label.setObjectName("titleLabel")
 
-        table = QTableWidget(len(ops), 4)
-        table.setHorizontalHeaderLabels(["操作", "源", "目标", "备注"])
-        table.verticalHeader().setVisible(False)
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setAlternatingRowColors(True)
-        for row, op in enumerate(ops):
-            values = [op.as_row()["操作"], op.src, op.dst, op.note]
-            for col, value in enumerate(values):
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("搜索片名、路径或备注…")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._apply_filter)
+
+        self.table = QTableWidget(len(self.plan), len(self.HEADERS))
+        self.table.setHorizontalHeaderLabels(self.HEADERS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self._haystack: list[str] = []
+
+        for index, row in enumerate(self.plan):
+            target = row["target"]
+            new_name = Path(target).name if target else "—"
+            target_dir = str(Path(target).parent) if target else "—"
+
+            cells = [
+                row["name"] or row["owner"],
+                new_name,
+                target_dir,
+                "✓" if row["rename"] else "—",
+                "✓" if row["nfo"] else "—",
+                "✓" if row["poster"] else "—",
+                "✓" if row["fanart"] else "—",
+                row["note"],
+            ]
+            for col, value in enumerate(cells):
                 cell = QTableWidgetItem(str(value))
                 cell.setToolTip(str(value))
-                table.setItem(row, col, cell)
-        header = table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+                if 3 <= col <= 6:
+                    cell.setTextAlignment(Qt.AlignCenter)
+                if col in (4, 5, 6) and value == "—":
+                    cell.setForeground(Qt.gray)
+                self.table.setItem(index, col, cell)
+
+            self._haystack.append(
+                " ".join([row["name"], row["owner"], new_name, target_dir, row["note"]]).lower()
+            )
+
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        for col in (3, 4, 5, 6):
+            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.Interactive)
+        self.table.setColumnWidth(0, 240)
+        self.table.setColumnWidth(7, 200)
 
         hint = QLabel("执行时只做同盘改名，不复制数据。完成后可在日志目录按日志撤销。")
         hint.setObjectName("hintLabel")
@@ -282,14 +375,12 @@ class PreviewDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addWidget(label)
-        layout.addWidget(table, 1)
+        layout.addWidget(self.search)
+        layout.addWidget(self.table, 1)
         layout.addWidget(hint)
         layout.addWidget(buttons)
 
-
-_KIND = {
-    "move": "移动/改名",
-    "write_nfo": "写入 nfo",
-    "download": "下载图片",
-    "mkdir": "新建目录",
-}
+    def _apply_filter(self, text: str) -> None:
+        needle = text.strip().lower()
+        for index, hay in enumerate(self._haystack):
+            self.table.setRowHidden(index, bool(needle) and needle not in hay)

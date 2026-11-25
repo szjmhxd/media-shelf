@@ -267,13 +267,16 @@ def _parse_title(raw: str) -> tuple[str, str]:
                 text = head
         # 没有可用前文（如「2012.mkv」），年份视为片名的一部分
 
-    # 中文名优先：取年份前第一段中文
-    cn = re.search(r"[\u4e00-\u9fff][\u4e00-\u9fff0-9：:·、\s]*", text)
-    if cn:
-        name = cn.group(0).strip(" .-_·:：")
-        name = re.sub(r"\s+", " ", name)
-        if len(name) >= 2:
-            return name, year
+    # 中文名优先：按分隔符切段，取第一段含中文的整段。
+    # 不能只匹配"连续中文"，否则「名侦探柯南VS怪盗基德」会在 VS 处被截成
+    # 「名侦探柯南」，「F1：狂飙飞车」会丢掉 F1 前缀。
+    segments = [seg for seg in re.split(r"[._\[\]()（）]+", text) if seg.strip()]
+    for seg in segments:
+        if re.search(r"[\u4e00-\u9fff]", seg):
+            name = seg.strip(" .-_·:：")
+            name = re.sub(r"\s+", " ", name)
+            if len(name) >= 2:
+                return name, year
 
     # 否则按点/下划线切开，去掉技术词
     parts = re.split(r"[._\s]+", text)

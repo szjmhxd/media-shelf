@@ -34,7 +34,7 @@ from .. import naming, organizer
 from .. import nfo as nfo_mod
 from ..tmdb import TMDBClient
 from .dialogs import MatchDialog, PreviewDialog, SettingsDialog
-from .workers import ApplyWorker, IdentifyWorker, ScanWorker
+from .workers import ApplyWorker, IdentifyWorker, KeyCheckWorker, ScanWorker
 
 COLUMNS = ["", "文件", "大小", "中文名", "英文名", "年份", "片源", "发布组", "新文件名", "状态"]
 COL_CHECK, COL_FILE, COL_SIZE, COL_CN, COL_EN, COL_YEAR, COL_SRC, COL_GROUP, COL_NEW, COL_STATUS = (
@@ -60,6 +60,7 @@ STATUS_COLORS = {
     "Key 无效": "#cf222e",
     "识别出错": "#cf222e",
     "待识别": "#6e7781",
+    "探测中…": "#6e7781",
 }
 
 
@@ -72,11 +73,13 @@ class MainWindow(QMainWindow):
         self.worker = None
         self._loading = False
         self._client: TMDBClient | None = None
+        self._key_state = ""
+        self._key_error = ""
 
         self.setWindowTitle("MediaShelf · 影视库整理")
         self.resize(1360, 820)
         self._build_ui()
-        self._refresh_key_state()
+        self._verify_key()
 
     # ------------------------------------------------------------------ 界面
     def _build_ui(self) -> None:
@@ -148,15 +151,14 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(COL_CHECK, QHeaderView.Fixed)
         self.table.setColumnWidth(COL_CHECK, 34)
         header.setSectionResizeMode(COL_FILE, QHeaderView.Interactive)
-        self.table.setColumnWidth(COL_FILE, 168)
+        self.table.setColumnWidth(COL_FILE, 200)
         header.setSectionResizeMode(COL_SIZE, QHeaderView.ResizeToContents)
-        for col, width in ((COL_CN, 104), (COL_EN, 118)):
-            header.setSectionResizeMode(col, QHeaderView.Fixed)
-            self.table.setColumnWidth(col, width)
         for col in (COL_YEAR, COL_SRC, COL_GROUP):
             header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
-        # 新文件名是主操作列，给足宽度；其余列压缩，避免 125% 缩放下被截断
-        header.setSectionResizeMode(COL_NEW, QHeaderView.Stretch)
+        # 中英文名和新文件名平分剩余宽度：固定死宽度会在 125% 缩放或窄窗口下
+        # 把"新文件名"挤成一条缝，正好是最需要看清的一列。
+        for col in (COL_CN, COL_EN, COL_NEW):
+            header.setSectionResizeMode(col, QHeaderView.Stretch)
         self.table.setMinimumWidth(720)
         header.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeToContents)
         self.table.itemChanged.connect(self._on_item_changed)
@@ -253,9 +255,45 @@ class MainWindow(QMainWindow):
             else "未配置 TMDB，使用 Wikidata 兜底（只有中英文名/年份）"
         )
         ffprobe = cfg.find_ffprobe(self.config.get("ffprobe", ""))
+        color = ""
+        if key:
+            if self._key_state == "ok":
+                source = "TMDB（已连接）"
+                color = "#1a7f37"
+            elif self._key_state == "fail":
+                source = f"TMDB（不可用：{self._key_error or '验证失败'}）"
+                color = "#cf222e"
+            elif self._key_state == "checking":
+                source = "TMDB（验证中…）"
+            else:
+                source = "TMDB（未验证）"
+        else:
+            source = "Wikidata（免 Key，命中率低）"
+            color = "#bc4c00"
         self.field_summary.setText(
-            f"ffprobe: {'已找到' if ffprobe else '未找到'}　|　数据源: {'TMDB' if key else 'Wikidata（免 Key，命中率低）'}"
+            f"ffprobe: {'已找到' if ffprobe else '未找到'}　|　数据源: {source}"
         )
+        self.field_summary.setStyleSheet(f"color: {color};" if color else "")
+
+    def _verify_key(self) -> None:
+        """启动和改完设置时验一次凭据，把结果显示在界面右下角。"""
+        key = self.config.get("tmdb_key", "").strip()
+        self._key_state = ""
+        self._key_error = ""
+        if not key:
+            self._refresh_key_state()
+            return
+        self._key_state = "checking"
+        self._refresh_key_state()
+        self.key_worker = KeyCheckWorker(key)
+        self.key_worker.checked.connect(self._on_key_checked)
+        self.key_worker.start()
+
+    def _on_key_checked(self, ok: bool, message: str) -> None:
+        self._key_state = "ok" if ok else "fail"
+        self._key_error = "" if ok else message
+        self._refresh_key_state()
+        self.log(("TMDB 凭据可用：" if ok else "TMDB 凭据不可用：") + message)
 
     # ------------------------------------------------------------------ 目录
     def pick_dir(self) -> None:
@@ -296,6 +334,7 @@ class MainWindow(QMainWindow):
             workers=int(self.config.get("probe_workers", 4) or 4),
         )
         self.worker.row_ready.connect(self._add_record)
+        self.worker.row_filled.connect(self._fill_record)
         self.worker.progress.connect(self._on_progress)
         self.worker.done.connect(self._scan_done)
         self.worker.start()
@@ -333,10 +372,30 @@ class MainWindow(QMainWindow):
 
         status = QTableWidgetItem(record.get("status", "待识别"))
         status.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        color = STATUS_COLORS.get(record.get("status", ""))
+        if color:
+            status.setForeground(QColor(color))
         self.table.setItem(row, COL_STATUS, status)
         self._loading = False
 
         self.refresh_preview(row)
+
+    def _fill_record(self, index: int, record: dict) -> None:
+        """探测完成后回填这一行的技术参数。"""
+        if index >= len(self.records) or index >= self.table.rowCount():
+            return
+        self.records[index] = record
+        self._loading = True
+        self.table.item(index, COL_SIZE).setText(_human_size(record.get("size", 0)))
+        self.table.item(index, COL_SRC).setText(record.get("source", ""))
+        self.table.item(index, COL_GROUP).setText(record.get("group", ""))
+        status_item = self.table.item(index, COL_STATUS)
+        status_item.setText(record.get("status", "待识别"))
+        color = STATUS_COLORS.get(record.get("status", ""))
+        if color:
+            status_item.setForeground(QColor(color))
+        self._loading = False
+        self.refresh_preview(index)
 
     def _scan_done(self, count: int) -> None:
         self.progress.setRange(0, 1)
@@ -700,7 +759,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() == SettingsDialog.Accepted:
             dialog.apply_to_config()
             self._client = None
-            self._refresh_key_state()
+            self._verify_key()
             self.log("设置已保存")
 
     def open_log_dir(self) -> None:

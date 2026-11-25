@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from mediashelf import config as cfg  # noqa: E402
+from mediashelf.ui.dialogs import PreviewDialog, _merge_by_owner  # noqa: E402
 from mediashelf.ui.main_window import MainWindow  # noqa: E402
 
 
@@ -66,10 +67,32 @@ def main() -> int:
     print("预览新名:", preview)
     assert "阿凡达.Avatar.2009" in preview, preview
 
+    # 两阶段扫描：行先出现（探测中），参数后回填
+    status = window.table.item(0, 9).text()
+    print("状态列:", status, "| 片源列:", window.table.item(0, 6).text())
+    assert status != "探测中…", "扫描结束后不应还停在探测中"
+    assert window.table.item(0, 6).text(), "探测完成后片源列应该有值"
+
     ops = window._build_plan()
     print("计划条目:", [(op.kind, Path(op.dst).name) for op in ops])
     assert any(op.kind == "move" for op in ops)
     assert any(op.kind == "write_nfo" for op in ops)
+    assert all(op.owner for op in ops), "每个操作都要带归属文件，预览才能合并"
+
+    # 执行计划预览：按文件合并 + 搜索过滤
+    merged = _merge_by_owner(ops)
+    print("合并后文件数:", len(merged), merged[0]["name"])
+    assert len(merged) == 1, "一个文件应合并成一行"
+    assert merged[0]["rename"] and merged[0]["nfo"]
+
+    dialog = PreviewDialog(ops)
+    assert dialog.table.rowCount() == 1
+    print("预览表头:", [dialog.table.horizontalHeaderItem(i).text() for i in range(8)])
+    dialog.search.setText("阿凡达")
+    assert not dialog.table.isRowHidden(0)
+    dialog.search.setText("不存在的片名")
+    assert dialog.table.isRowHidden(0), "搜索应能过滤掉不匹配的行"
+    dialog.deleteLater()
 
     window.close()
     print("界面接线正常")

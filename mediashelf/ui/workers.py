@@ -22,12 +22,24 @@ def _similar(a: str, b: str) -> float:
     a, b = _norm(a), _norm(b)
     if not a or not b:
         return 0.0
-    return difflib.SequenceMatcher(None, a, b).ratio()
+    score = difflib.SequenceMatcher(None, a, b).ratio()
+    # 副标题前缀：库里叫《冲出地球》，TMDB 叫《星游记之冲出地球》，字符相似度
+    # 只有 0.67，会被阈值判成"无匹配"。一方完整包含另一方时给固定高分。
+    # 长度差至少 2 才算，否则《流浪地球》会被判成《流浪地球2》。
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    if len(short) >= 4 and len(long) - len(short) >= 2 and short in long:
+        score = max(score, 0.93)
+    # 反过来，只差一个尾部序号的是续集，不是同一部：
+    # 《流浪地球》和《流浪地球2》原始相似度 0.89，靠年份不一定救得回来。
+    if long.startswith(short) and long[len(short) :].isdigit():
+        score = min(score, 0.75)
+    return score
 
 
 class ScanWorker(QThread):
     progress = Signal(int, int, str)
     row_ready = Signal(object)
+    row_filled = Signal(int, object)
     done = Signal(int)
 
     def __init__(self, root: Path, ffprobe: str, recursive: bool = True, workers: int = 4) -> None:
@@ -42,11 +54,11 @@ class ScanWorker(QThread):
     def stop(self) -> None:
         self._stop = True
 
-    def _one(self, video: Path) -> dict | None:
+    def _one(self, video: Path, index: int):
         if self._stop:  # 已请求停止：排队中的任务直接跳过，别让线程池拖着界面
             return None
         result = probe(video, self.ffprobe)
-        return {
+        return index, {
             "path": str(video),
             "name": video.name,
             "size": result.size,
@@ -67,28 +79,74 @@ class ScanWorker(QThread):
             self.done.emit(0)
             return
 
+        # 第一阶段：先把文件铺到表格里，界面立刻有东西看。
+        # 探测一个 NAS 上的 50 GB 文件要一两秒，串起来就是两分钟空表格。
+        self.progress.emit(0, total, "读取文件列表…")
+        for video in files:
+            try:
+                size = video.stat().st_size
+            except OSError:
+                size = 0
+            self.row_ready.emit(
+                {
+                    "path": str(video),
+                    "name": video.name,
+                    "size": size,
+                    "probe": None,
+                    "meta": {},
+                    "source": "",
+                    "group": naming.detect_group(video.name)
+                    or naming.detect_group(video.parent.name),
+                    "edition": naming.detect_edition(video.name),
+                    "checked": True,
+                    "status": "探测中…",
+                    "target": "",
+                }
+            )
+
+        # 第二阶段：并发探测，逐个回填参数
         count = 0
         futures: list = []
         pool = ThreadPoolExecutor(max_workers=self.workers)
         try:
-            futures = [pool.submit(self._one, video) for video in files]
+            futures = [pool.submit(self._one, video, i) for i, video in enumerate(files)]
             for future in as_completed(futures):
                 if self._stop:
                     break
                 try:
-                    record = future.result()
+                    payload = future.result()
                 except Exception:  # noqa: BLE001 - 单个文件异常不能中断整批
                     continue
-                if not record:
+                if not payload:
                     continue
+                index, record = payload
                 count += 1
-                self.row_ready.emit(record)
+                self.row_filled.emit(index, record)
                 self.progress.emit(count, total, record["name"])
         finally:
             for future in futures:
                 future.cancel()
             pool.shutdown(wait=False, cancel_futures=True)
             self.done.emit(count)
+
+
+class KeyCheckWorker(QThread):
+    """后台验证 TMDB 凭据，别让启动时卡在网络上。"""
+
+    checked = Signal(bool, str)
+
+    def __init__(self, key: str) -> None:
+        super().__init__()
+        self.key = key
+
+    def run(self) -> None:  # noqa: D102
+        from ..tmdb import test_key
+
+        try:
+            ok, message = test_key(self.key)
+        except Exception as exc:  # noqa: BLE001 - 验证失败也要把原因显示出来
+            ok, message = False, str(exc)
+        self.checked.emit(ok, message)
 
 
 class IdentifyWorker(QThread):
@@ -179,7 +237,7 @@ class IdentifyWorker(QThread):
             return matched, pending + 1
 
         # 阈值偏严格：错配的片名比空着更麻烦，空着至少一眼能看出来
-        if best_score >= 0.9 or (best_year_ok and best_score >= 0.8):
+        if best_score >= 0.9 or (best_year_ok and best_score >= 0.85):
             status = "已匹配"
         elif best_score >= 0.7:
             status = "需人工确认"
