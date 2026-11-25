@@ -165,6 +165,12 @@ def probe(path: str | Path, ffprobe: str, timeout: int = 60) -> ProbeResult:
         ffprobe,
         "-v",
         "error",
+        # 只读文件头和少量样本就够了：默认设置会在网络盘上把 50 GB 的 remux
+        # 从头分析很久，超时后报「ffprobe 调用失败」。这两个参数把探测压到秒级。
+        "-analyzeduration",
+        "20M",
+        "-probesize",
+        "20M",
         "-print_format",
         "json",
         "-show_format",
@@ -173,8 +179,11 @@ def probe(path: str | Path, ffprobe: str, timeout: int = 60) -> ProbeResult:
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        result.error = str(exc)
+    except subprocess.TimeoutExpired:
+        result.error = f"读取超时（{timeout}s），文件可能损坏或网络盘太慢"
+        return result
+    except OSError as exc:
+        result.error = f"无法启动 ffprobe：{exc}"
         return result
 
     if proc.returncode != 0:

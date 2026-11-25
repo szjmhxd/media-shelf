@@ -54,6 +54,11 @@ STATUS_COLORS = {
     "手动指定": "#0969da",
     "需人工确认": "#bc4c00",
     "无搜索结果": "#cf222e",
+    "无匹配": "#cf222e",
+    "无匹配：文件名里没有片名": "#cf222e",
+    "网络错误": "#cf222e",
+    "Key 无效": "#cf222e",
+    "识别出错": "#cf222e",
     "待识别": "#6e7781",
 }
 
@@ -245,11 +250,11 @@ class MainWindow(QMainWindow):
         self.identify_btn.setToolTip(
             "使用 TMDB 抓取完整元数据"
             if key
-            else "未配置 TMDB，使用维基百科兜底（仅中英文名/年份/简介）"
+            else "未配置 TMDB，使用 Wikidata 兜底（只有中英文名/年份）"
         )
         ffprobe = cfg.find_ffprobe(self.config.get("ffprobe", ""))
         self.field_summary.setText(
-            f"ffprobe: {'已找到' if ffprobe else '未找到'}　|　数据源: {'TMDB' if key else '维基百科（免 Key）'}"
+            f"ffprobe: {'已找到' if ffprobe else '未找到'}　|　数据源: {'TMDB' if key else 'Wikidata（免 Key，命中率低）'}"
         )
 
     # ------------------------------------------------------------------ 目录
@@ -265,6 +270,8 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ 扫描
     def scan(self) -> None:
+        if self._guard_busy("扫描"):
+            return
         if not self.root or not self.root.exists():
             QMessageBox.warning(self, "没有目录", "先选择一个媒体目录。")
             return
@@ -347,15 +354,17 @@ class MainWindow(QMainWindow):
                 self._client = TMDBClient(key, self.config.get("language", "zh-CN"))
             return self._client
 
-        # 没有 Key 时用维基百科兜底，至少能拿到中英文名与简介
+        # 没有 Key 时用 Wikidata 兜底，至少能拿到中英文名与年份
         from ..wiki import WikiProvider
 
         if self._client is None or not isinstance(self._client, WikiProvider):
             self._client = WikiProvider(self.config.get("language", "zh-CN"))
-            self.log("未配置 TMDB，改用维基百科接口（无评分/演员表，nfo 字段较少）")
+            self.log("未配置 TMDB，改用 Wikidata（只有中英文名和年份，命中率明显低于 TMDB）")
         return self._client
 
     def identify(self) -> None:
+        if self._guard_busy("识别"):
+            return
         client = self._ensure_client()
         if client is None:
             return
@@ -364,6 +373,7 @@ class MainWindow(QMainWindow):
             return
 
         self.log("开始联网识别…")
+        self.identify_btn.setEnabled(False)
         self.progress.setRange(0, len(self.records))
         self.worker = IdentifyWorker(client, self.records)
         self.worker.progress.connect(self._on_progress)
@@ -382,14 +392,17 @@ class MainWindow(QMainWindow):
         if meta.get("query"):
             record["query"] = meta["query"]
 
+        # 失败重跑时不要用空值覆盖已填好的内容
+        has_name = bool(meta.get("cn") or meta.get("en"))
         self._loading = True
-        cn_item = self.table.item(index, COL_CN)
-        cn_item.setText(meta.get("cn", ""))
-        cn_item.setToolTip(meta.get("overview") or meta.get("cn", ""))
-        en_item = self.table.item(index, COL_EN)
-        en_item.setText(meta.get("en") or meta.get("original", ""))
-        en_item.setToolTip(meta.get("en") or meta.get("original", ""))
-        self.table.item(index, COL_YEAR).setText(str(meta.get("year", "")))
+        if has_name:
+            cn_item = self.table.item(index, COL_CN)
+            cn_item.setText(meta.get("cn", ""))
+            cn_item.setToolTip(meta.get("overview") or meta.get("cn", ""))
+            en_item = self.table.item(index, COL_EN)
+            en_item.setText(meta.get("en") or meta.get("original", ""))
+            en_item.setToolTip(meta.get("en") or meta.get("original", ""))
+            self.table.item(index, COL_YEAR).setText(str(meta.get("year") or ""))
         status_item = self.table.item(index, COL_STATUS)
         status_item.setText(status)
         color = STATUS_COLORS.get(status)
@@ -401,9 +414,30 @@ class MainWindow(QMainWindow):
     def _identify_done(self, matched: int, pending: int) -> None:
         self.progress.setRange(0, 1)
         self.progress.setValue(1)
-        self.log(f"识别完成：已匹配 {matched} 部，需人工确认 {pending} 部")
-        self._status(f"识别完成：{matched} 部匹配，{pending} 部待确认")
+        self.identify_btn.setEnabled(True)
+        self.log(f"识别完成：已匹配 {matched} 部，未匹配 {pending} 部")
+        self._status(f"识别完成：{matched} 部匹配，{pending} 部未匹配")
         self.refresh_all_previews()
+
+        # 一部都没匹配上，几乎一定是数据源的问题，而不是片名的问题
+        if matched == 0 and pending:
+            has_key = bool(self.config.get("tmdb_key", ""))
+            if not has_key:
+                self.log(
+                    "提示：未配置 TMDB 时只能用 Wikidata，中文片名命中率很低。"
+                    "到 themoviedb.org 申请免费 Key 填进设置，识别质量会正常。"
+                )
+                QMessageBox.warning(
+                    self,
+                    "一部都没匹配上",
+                    "当前用的是 Wikidata 兜底，它的中文片名覆盖率很低，大部分片子查不到。\n\n"
+                    "解决办法：到 themoviedb.org 注册后申请免费 API Key（设置 → API），"
+                    "填进本程序的「设置」里，再点一次联网识别。\n\n"
+                    "不改名也能继续用：现在点「预览并执行」会按文件名解析出的片名和年份改名，"
+                    "只是没有英文名和 nfo。",
+                )
+            else:
+                self.log("提示：检查 TMDB Key 是否有效，或网络是否需要代理。")
 
     # ------------------------------------------------------------------ 表格
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
@@ -539,13 +573,33 @@ class MainWindow(QMainWindow):
             download_images=self.image_check.isChecked(),
         )
 
+    def _busy(self) -> bool:
+        return bool(self.worker is not None and self.worker.isRunning())
+
+    def _guard_busy(self, action: str) -> bool:
+        """正在跑后台任务时不许再叠一个，否则计划基于半截数据生成。"""
+        if self._busy():
+            QMessageBox.information(self, "还在处理", f"{action}尚未结束，等进度条走完再操作。")
+            return True
+        return False
+
     def preview_and_apply(self) -> None:
+        if self._guard_busy("识别"):
+            return
         if not self.records:
-            QMessageBox.information(self, "没有数据", "先扫描并识别。")
+            QMessageBox.information(self, "没有数据", "先扫描目录。")
             return
         ops = self._build_plan()
         if not ops:
-            QMessageBox.information(self, "没有可执行的操作", "检查是否已勾选、是否已匹配。")
+            QMessageBox.information(
+                self,
+                "没有可执行的操作",
+                "没有生成任何操作，通常是这三种原因：\n\n"
+                "1. 没有勾选任何行（表格最左侧的复选框）\n"
+                "2. 目标文件名和现有文件名完全一样，没有可改的\n"
+                "3. 目标重名，被跳过了\n\n"
+                "看表格「状态」列能确认每行的具体情况。",
+            )
             return
         dialog = PreviewDialog(ops, self)
         if dialog.exec() != PreviewDialog.Accepted:
@@ -553,13 +607,20 @@ class MainWindow(QMainWindow):
         self._run_ops(ops)
 
     def only_nfo(self) -> None:
+        if self._guard_busy("识别"):
+            return
         if not self.records:
             QMessageBox.information(self, "没有数据", "先扫描并识别。")
             return
         self.config.set("write_nfo", True)
         ops = [op for op in self._build_plan(only_nfo=True) if op.kind in ("write_nfo", "download")]
         if not ops:
-            QMessageBox.information(self, "没有可写入的内容", "需要先完成识别。")
+            QMessageBox.information(
+                self,
+                "没有可写入的内容",
+                "nfo 必须有中英文名等元数据才能生成。\n\n"
+                "先完成「联网识别」，或直接在表格里手工填中文名、英文名、年份，再试一次。",
+            )
             return
         if (
             QMessageBox.question(self, "写入 NFO", f"将为 {len(ops)} 项写入 nfo / 图片，继续？")

@@ -83,6 +83,24 @@ class NamingTest(unittest.TestCase):
         )
         self.assertEqual(naming.detect_group("阿凡达 (2009).mkv"), "")
 
+    def test_guess_query_title_starts_with_year(self) -> None:
+        """《2012》这种片名本身是年份，不能把年份当片名、片名当空。"""
+        query, year = naming.guess_query("N:/电影/2012 (2009).mkv")
+        self.assertEqual((query, year), ("2012", "2009"))
+
+    def test_fields_without_meta_parse_from_filename(self) -> None:
+        """没有联网元数据时，片名和年份要从文件名解析出来，不能整段塞进 {cn}。"""
+        record = {"path": "N:/电影/奥本海默 (2023).mkv", "probe": None, "meta": {}}
+        fields = naming.build_fields(record)
+        self.assertEqual(fields["cn"], "奥本海默")
+        self.assertEqual(fields["year"], "2023")
+
+    def test_fields_ignore_generic_parent(self) -> None:
+        record = {"path": "N:/电影/沙丘2.mp4", "probe": None, "meta": {}}
+        fields = naming.build_fields(record)
+        self.assertEqual(fields["cn"], "沙丘2")
+        self.assertEqual(fields["year"], "")
+
 
 class NfoTest(unittest.TestCase):
     def test_build_and_parse(self) -> None:
@@ -151,6 +169,24 @@ class PlanTest(unittest.TestCase):
             [self.record], self.root, template="{cn}", folder_template="{cn}", write_nfo=False
         )
         self.assertEqual(ops, [])
+
+    def test_plan_renames_without_metadata(self) -> None:
+        """一部都没识别出来时也必须能改名，否则工具在没 Key 的环境下完全没用。"""
+        record = {"path": str(self.video), "checked": True, "meta": {}, "probe": None}
+        ops = organizer.build_plan(
+            [record],
+            self.root,
+            template="{cn}.{year}",
+            folder_template="{cn} ({year})",
+            organize=True,
+            write_nfo=True,
+        )
+        moves = [op for op in ops if op.kind == "move"]
+        self.assertTrue(moves, "没有元数据也应该生成改名操作")
+        self.assertEqual(Path(moves[0].dst).parent.name, "阿凡达 (2009)")
+        self.assertEqual(Path(moves[0].dst).name, "阿凡达.2009.mkv")
+        # nfo 需要元数据，不能凭空生成
+        self.assertFalse([op for op in ops if op.kind == "write_nfo"])
 
     def test_execute_and_undo(self) -> None:
         with tempfile.TemporaryDirectory() as fake_appdata:

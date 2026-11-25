@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "MediaShelf"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 
 # 目前默认使用的中英双语详细模板
 DEFAULT_TEMPLATE = "{cn}.{en}.{year}.{source}.{res}.{codec}.{hdr}.{audio}-{group}"

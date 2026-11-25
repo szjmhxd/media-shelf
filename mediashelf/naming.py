@@ -146,23 +146,34 @@ class _SafeDict(dict):
 
 
 def build_fields(record: dict) -> dict[str, str]:
-    """把一条记录（探测结果 + 元数据）摊平成模板字段。"""
+    """把一条记录（探测结果 + 元数据）摊平成模板字段。
+
+    元数据缺失时按文件名就地解析片名与年份——不联网也应该能整理出干净结构，
+    否则「奥本海默 (2023).mkv」会被当成整段片名塞进模板。
+    """
     probe = record.get("probe")
     meta = record.get("meta") or {}
+    path = Path(record.get("path", ""))
 
     cn = (meta.get("cn") or "").strip()
-    en = (meta.get("en") or "").strip()
+    en = (meta.get("en") or meta.get("original") or "").strip()
+    year = str(meta.get("year") or "").strip()
+
     if not cn:
-        cn = en or Path(record.get("path", "")).stem
-    if not en:
-        en = meta.get("original") or ""
-    if en and en.strip().lower() == cn.strip().lower():
+        stem_title, stem_year = _parse_title(path.stem)
+        dir_title, dir_year = ("", "")
+        if path.parent.name.strip().lower() not in GENERIC_DIRS:
+            dir_title, dir_year = _parse_title(path.parent.name)
+        cn = stem_title or dir_title or path.stem
+        if not year:
+            year = stem_year or dir_year
+    if en.strip().lower() == cn.strip().lower():
         en = ""
 
     fields = {
         "cn": cn,
         "en": en,
-        "year": str(meta.get("year") or ""),
+        "year": year,
         "res": getattr(probe, "res", "") or "",
         "source": record.get("source") or (probe.source_guess() if probe else ""),
         "codec": getattr(probe, "codec", "") or "",
@@ -241,11 +252,20 @@ def _parse_title(raw: str) -> tuple[str, str]:
     text = re.sub(r"[\[【][^\]】]*[\]】]", " ", text)
     text = re.sub(r"@[\w\u4e00-\u9fff]+", " ", text)
 
+    # 年份要从「末尾括号」或「最后一个独立年份」里取，不能取第一个四位数：
+    # 《2012》这种片名本身以年份开头，取第一个会得到空片名。
     year = ""
-    match = re.search(r"(19\d{2}|20\d{2})", text)
-    if match:
-        year = match.group(1)
-        text = text[: match.start()]
+    tail = re.search(r"[\(\[]\s*((?:19|20)\d{2})\s*[\)\]]\s*$", text)
+    if tail:
+        year = tail.group(1)
+        text = text[: tail.start()]
+    else:
+        for match in re.finditer(r"(?<![0-9])((?:19|20)\d{2})(?![0-9])", text):
+            head = text[: match.start()].strip(" .-_·:：")
+            if head:
+                year = match.group(1)
+                text = head
+        # 没有可用前文（如「2012.mkv」），年份视为片名的一部分
 
     # 中文名优先：取年份前第一段中文
     cn = re.search(r"[\u4e00-\u9fff][\u4e00-\u9fff0-9：:·、\s]*", text)

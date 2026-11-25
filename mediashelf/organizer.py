@@ -99,7 +99,11 @@ def build_plan(
     write_nfo: bool = True,
     download_images: bool = True,
 ) -> list[Op]:
-    """按记录生成计划。records 里未勾选 / 未匹配的直接跳过。"""
+    """按记录生成计划。
+
+    改名不依赖联网元数据：片名和年份可以从文件名就地解析，所以即使一部都没识别，
+    也能把库整理成「片名 (年份)/片名 (年份).mkv」。nfo 与海报必须有元数据才会生成。
+    """
     ops: list[Op] = []
     taken: dict[str, str] = {}
 
@@ -107,8 +111,7 @@ def build_plan(
         if not record.get("checked", True):
             continue
         meta = record.get("meta") or {}
-        if not meta.get("cn") and not meta.get("en"):
-            continue
+        has_meta = bool(meta.get("cn") or meta.get("en"))
 
         video = Path(record["path"])
         filename = naming.render_filename(record, template)
@@ -134,8 +137,9 @@ def build_plan(
             continue
         taken[key] = str(video)
 
+        note = "改名/归档" if has_meta else "改名/归档（未识别，片名取自文件名）"
         if str(video) != str(target):
-            ops.append(Op("move", str(video), str(target), "改名/归档"))
+            ops.append(Op("move", str(video), str(target), note))
             for extra in sidecars(video):
                 suffix = extra.name[len(video.stem) :]
                 ops.append(
@@ -147,7 +151,7 @@ def build_plan(
                     )
                 )
 
-        if write_nfo:
+        if write_nfo and has_meta:
             ops.append(
                 Op(
                     "write_nfo",

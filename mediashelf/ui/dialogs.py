@@ -197,7 +197,7 @@ class MatchDialog(QDialog):
     def _search(self) -> None:
         if self.client is None:
             QMessageBox.warning(
-                self, "缺少数据源", "请先在设置里填写 TMDB 凭据，或直接使用维基百科。"
+                self, "缺少数据源", "请先在设置里填写 TMDB 凭据，或直接使用免 Key 的 Wikidata。"
             )
             return
         self.list.clear()
@@ -207,7 +207,7 @@ class MatchDialog(QDialog):
             results = self.client.search(
                 self.query_edit.text().strip(), self.year_edit.text().strip()
             )
-        except Exception as exc:  # noqa: BLE001 - 数据源可能是维基百科
+        except Exception as exc:  # noqa: BLE001 - 数据源可能是 Wikidata
             self.info.setText(f"搜索失败：{exc}")
             return
         finally:
