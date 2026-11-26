@@ -140,6 +140,57 @@ def main() -> int:
     assert not (shells).exists()
     assert (left / "a.mkv").exists(), "有视频的目录必须原样保留"
 
+    # 剧集：同目录两集 → 判 tv，计划落进 Season 子目录
+    series = tmp / "碧蓝之海" / "第一季"
+    series.mkdir(parents=True)
+    ep1 = series / "[DBD-Raws][Grand Blue][01].mkv"
+    ep2 = series / "[DBD-Raws][Grand Blue][02].mkv"
+    ep1.write_bytes(b"x" * 4096)
+    ep2.write_bytes(b"x" * 4096)
+
+    from mediashelf.ui.workers import classify_media
+
+    kinds = classify_media([ep1, ep2])
+    print("剧集判定:", {k.split("/")[-1]: v for k, v in kinds.items()})
+    assert all(v["kind"] == "tv" for v in kinds.values())
+    assert kinds[str(ep2)]["episode"] == 2
+
+    record = {
+        "path": str(ep1),
+        "probe": None,
+        "meta": {
+            "cn": "碧蓝之海",
+            "original": "ぐらんぶる",
+            "en": "Grand Blue",
+            "original_language": "ja",
+            "year": "2018",
+            "tmdbid": 79166,
+            "ep_title": "深蓝",
+        },
+        "kind": "tv",
+        "season": 1,
+        "episode": 1,
+        "checked": True,
+        "source": "BDRip",
+        "group": "",
+        "edition": "",
+    }
+    from mediashelf import organizer as org
+
+    ops = org.build_plan(
+        [record],
+        tmp,
+        template="{cn}.{orig}.S{season}E{episode}.{res}",
+        folder_template="{cn} ({year})",
+        ep_template="{cn}.{orig}.S{season}E{episode}.{res}",
+    )
+    targets = [Path(op.dst) for op in ops if op.kind == "move"]
+    nfo_names = [Path(op.dst).name for op in ops if op.kind == "write_nfo"]
+    print("剧集计划:", [t.relative_to(tmp) for t in targets], nfo_names)
+    assert targets[0].parent.name == "Season 01"
+    assert "ぐらんぶる" in targets[0].name and "S01E01" in targets[0].name
+    assert "tvshow.nfo" in nfo_names and "S01E01.nfo" in nfo_names
+
     window.close()
     print("界面接线正常")
     return 0

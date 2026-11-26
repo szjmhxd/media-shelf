@@ -17,8 +17,9 @@ MediaShelf 的做法是：先用 ffprobe 读出真实参数，再用 TMDB 查出
 | 能力 | 说明 |
 |---|---|
 | 重命名 | 模板化命名，字段可插拔，实时预览新名字 |
-| 整理文件夹 | 按 `片名 (年份)` 归档，系列电影归入 `XXX Collection`，字幕跟随改名 |
-| 设置 / 删除 nfo | 生成 Kodi 标准 `movie.nfo`，可同步下载 poster / fanart；删除前默认备份 |
+| 整理文件夹 | 电影按 `片名 (年份)` 归档，剧集按 `剧名 (年)/Season XX/剧名 - SxxExx` 归档，系列电影归入 `XXX Collection` |
+| 剧集支持 | 自动区分电影与剧集，识别四种集号格式，TMDB TV 接口取中英文名与集标题 |
+| 设置 / 删除 nfo | 生成 Kodi 标准 `movie.nfo` / `tvshow.nfo` / 每集 nfo，可同步下载 poster / fanart |
 | 撤销 | 每次执行写一份 CSV 日志，一键按日志反向还原 |
 
 ## 安装
@@ -57,20 +58,23 @@ Windows 上 ffmpeg 可以用 `winget install Gyan.FFmpeg`，程序也会自动�
 模板里用 `{字段}` 占位，分隔符自己定。默认模板：
 
 ```
-{cn}.{en}.{year}.{source}.{res}.{codec}.{hdr}.{audio}-{group}
+{cn}.{orig}.{year}.{source}.{res}.{codec}.{hdr}.{audio}-{group}
 ```
 
 渲染结果：
 
 ```
-阿凡达.Avatar.2009.BluRay.2160p.x265.10bit.DV.HDR.TrueHD.7.1.Atmos-DreamHD.mkv
-夺宝奇兵1：法柜奇兵.Indiana.Jones.and.the.Raiders.of.the.Lost.Ark.1981.BluRay.2160p.x265.10bit.DV.HDR.DTS-HD.MA.7.1-老K.mkv
+疯狂动物城.Zootopia.2016.BluRay.2160p.x265.10bit.DV.HDR.TrueHD.7.1.Atmos-DreamHD.mkv
+碧蓝之海.ぐらんぶる.2018.BDRip.1080p.x265.10bit-DBD-Raws.mkv
 ```
+
+第二段 `{orig}` 按作品语言挑名字：日本动画出日文原名（`ぐらんぶる`），英语片出英文名（`Zootopia`），韩国片出韩文原名。判断依据是 TMDB 的 `original_language` 字段，不猜文本里有没有假名。中文作品的原名就是中文，会和第一段重复，此时退化成英文名。想要一律用英文，把第二段换成 `{en}`。
 
 | 字段 | 含义 | 来源 |
 |---|---|---|
 | `{cn}` | 中文片名 | TMDB `title`（zh-CN） |
-| `{en}` | 原始或英文片名 | TMDB `original_title`，非英文时取 alias 中的 US/GB 标题 |
+| `{orig}` | 语言原名 | `original_language` 为中文时取英文名，否则取原名 |
+| `{en}` | 英文片名 | TMDB alias 中的 US/GB 标题 |
 | `{year}` | 上映年份 | TMDB `release_date` |
 | `{res}` | 2160p / 1080p / 720p | ffprobe 实际宽高 |
 | `{source}` | BluRay / REMUX / WEB-DL / HDRip | 原文件名优先，缺失时按码率与体积推断 |
@@ -80,6 +84,9 @@ Windows 上 ffmpeg 可以用 `winget install Gyan.FFmpeg`，程序也会自动�
 | `{group}` | 发布组 | 文件名 `-` 之后的片段 |
 | `{edition}` | EXTENDED / PROPER / IMAX | 文件名中的版本标记 |
 | `{collection}` | 系列名 | TMDB `belongs_to_collection` |
+| `{season}` | 季（剧集） | 01、02…，由文件名或父目录解析 |
+| `{episode}` | 集（剧集） | 01、02… |
+| `{ep_title}` | 集标题（剧集） | TMDB season 接口 |
 
 内置四套预设：媒体库简洁、中英双语详细、标准场景命名、仅英文。改过的模板会显示为「自定义」。
 
@@ -117,6 +124,41 @@ TMDB 的免费 Key 申请：注册后进入 设置 → API → 申请开发者�
 图片写相对文件名，不用绝对路径。原因很实际：网上流传的 nfo 常把 `<poster>` 写成发布者自己 NAS 上的路径，换一台机器就全部失效。
 
 删除 nfo 时默认先复制到库根目录的 `_nfo_backup`，再删原文件；该目录不在媒体库扫描范围内。
+
+## 剧集整理
+
+剧集走 TMDB 的 TV 接口（`/search/tv`、`/tv/{id}`、`/tv/{id}/season/{n}`），和电影是两套数据。自动区分电影与剧集的规则：
+
+**同一个目录里出现 ≥2 个不同集号才算剧集。** 单个文件就算名字里带「01」也可能是《101忠狗》这类片名，误判成剧集会把电影搬进 Season 01，收拾起来比重命名麻烦得多。
+
+集号支持四种格式，实测一个 333 文件的库里 `SxxExx` 出现 0 次，反倒是这四种到处都是：
+
+| 格式 | 例子 | 来源 |
+|---|---|---|
+| 纯数字 | `01.flv` | 老番、FLV 片源 |
+| 方括号 | `[DBD-Raws][Grand Blue][01][1080P].mkv` | 字幕组 |
+| 中文序号 | `第01话 那就是恋情的开端 4K.mp4` | B 站片源 |
+| 末尾数字 | `HUNTER×HUNTER(2011) 001.mkv` | 重制版 |
+| 分隔符夹着 | `Dan Da Dan - 01 [IQIYI WebRip].mkv` | 合并包拆分 |
+
+季号从文件名或父目录找：`第二季 抢先版`（中文数字）、`胆大党S01`、`Season 02` 都认。
+
+整理后的结构是 Jellyfin / Emby / Kodi 通用的：
+
+```
+碧蓝之海 (2018)/
+  tvshow.nfo          ← 剧级元数据，整部剧只写一次
+  poster.jpg
+  fanart.jpg
+  Season 01/
+    S01E01.nfo
+    碧蓝之海.ぐらんぶる.S01E01.1080p.x265.10bit.mkv
+    碧蓝之海.ぐらんぶる.S01E02.1080p.x265.10bit.mkv
+  Season 02/
+    ...
+```
+
+剧名的搜索词从父目录取，因为文件名是 `01.flv` 这种没有片名的。`全职猎人/全职猎人1999/01.flv` 会解析成「全职猎人」+ 年份 1999。
 
 ## 整理后清理空目录
 

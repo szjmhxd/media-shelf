@@ -131,16 +131,126 @@ class TMDBClient:
         self.save_cache()
         return meta
 
+    # ------------------------------------------------------------------ 剧集（TV）
+    def search_tv(self, query: str, year: str = "") -> list[dict[str, Any]]:
+        """剧集搜索。TMDB 的剧集和电影是两套接口，不能混用。"""
+        params: dict[str, Any] = {"query": query, "include_adult": "false"}
+        if year:
+            params["first_air_date_year"] = year
+        data = self._get("/search/tv", params)
+        results = data.get("results") or []
+        if not results and year:
+            data = self._get("/search/tv", {"query": query, "include_adult": "false"})
+            results = data.get("results") or []
+        return [self._brief_tv(item) for item in results]
+
+    def tv_details(self, tmdb_id: int) -> dict[str, Any]:
+        key = f"tvdetail:{tmdb_id}:{self.language}"
+        if key in self.cache:
+            return self.cache[key]
+        data = self._get(
+            f"/tv/{tmdb_id}",
+            {"append_to_response": "alternative_titles,credits,external_ids"},
+        )
+        meta = self._normalize_tv(data)
+        self.cache[key] = meta
+        self.save_cache()
+        return meta
+
+    def season_details(self, tmdb_id: int, season: int) -> list[dict[str, Any]]:
+        """某一季的集列表：集号 + 集标题。文件重命名时用得上。"""
+        key = f"tvseason:{tmdb_id}:{season}:{self.language}"
+        if key in self.cache:
+            return self.cache[key]
+        data = self._get(f"/tv/{tmdb_id}/season/{season}")
+        episodes = [
+            {
+                "number": item.get("episode_number") or 0,
+                "title": (item.get("name") or "").strip(),
+                "air_date": item.get("air_date") or "",
+            }
+            for item in data.get("episodes") or []
+        ]
+        self.cache[key] = episodes
+        self.save_cache()
+        return episodes
+
+    def _brief_tv(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": item.get("id"),
+            "kind": "tv",
+            "cn": item.get("name") or "",
+            "original": item.get("original_name") or "",
+            "year": (item.get("first_air_date") or "")[:4],
+            "overview": item.get("overview") or "",
+            "rating": round(float(item.get("vote_average") or 0), 1),
+            "poster": item.get("poster_path") or "",
+            "original_language": item.get("original_language") or "",
+        }
+
+    def _normalize_tv(self, data: dict[str, Any]) -> dict[str, Any]:
+        original = (data.get("original_name") or "").strip()
+        english = _english_title(data, original)
+        air = data.get("first_air_date") or ""
+        genres = [g.get("name", "") for g in data.get("genres") or []]
+        crew = ((data.get("credits") or {}).get("crew")) or []
+        cast = ((data.get("credits") or {}).get("cast")) or []
+        external = data.get("external_ids") or {}
+
+        return {
+            "id": data.get("id"),
+            "kind": "tv",
+            "cn": data.get("name") or original,
+            "en": english,
+            "original": original,
+            "year": air[:4] if air else "",
+            "release_date": air,
+            "runtime": (data.get("episode_run_time") or [0])[0],
+            "rating": round(float(data.get("vote_average") or 0), 1),
+            "votes": data.get("vote_count") or 0,
+            "overview": data.get("overview") or "",
+            "tagline": data.get("tagline") or "",
+            "genres": genres,
+            "tmdbid": data.get("id"),
+            "imdbid": external.get("imdb_id") or "",
+            "collection": "",
+            "collection_id": "",
+            "poster": data.get("poster_path") or "",
+            "backdrop": data.get("backdrop_path") or "",
+            "directors": [p.get("name") for p in crew if p.get("job") == "Creator"][:3],
+            "actors": [
+                {
+                    "name": p.get("name") or "",
+                    "role": p.get("character") or "",
+                    "thumb": p.get("profile_path") or "",
+                }
+                for p in cast[:12]
+            ],
+            "country": data.get("origin_country") or [],
+            "original_language": data.get("original_language") or "",
+            "seasons": [
+                {
+                    "number": s.get("season_number") or 0,
+                    "name": s.get("name") or "",
+                    "episodes": s.get("episode_count") or 0,
+                }
+                for s in data.get("seasons") or []
+            ],
+            "in_production": bool(data.get("in_production")),
+        }
+
     # ------------------------------------------------------------------ 归一
     def _brief(self, item: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": item.get("id"),
+            "kind": "movie",
             "cn": item.get("title") or "",
             "original": item.get("original_title") or "",
             "year": (item.get("release_date") or "")[:4],
             "overview": item.get("overview") or "",
             "rating": round(float(item.get("vote_average") or 0), 1),
             "poster": item.get("poster_path") or "",
+            "original_language": item.get("original_language") or "",
         }
 
     def _normalize(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -156,6 +266,7 @@ class TMDBClient:
 
         return {
             "id": data.get("id"),
+            "kind": "movie",
             "cn": data.get("title") or original,
             "en": english,
             "original": original,
@@ -183,6 +294,7 @@ class TMDBClient:
                 for p in cast[:12]
             ],
             "country": [c.get("iso_3166_1") for c in data.get("production_countries") or []],
+            "original_language": data.get("original_language") or "",
         }
 
     # ------------------------------------------------------------------ 图片
@@ -209,7 +321,9 @@ def _english_title(data: dict[str, Any], original: str) -> str:
     if original and all(ord(ch) < 128 or not ch.isalpha() for ch in original):
         return original
 
-    aliases = ((data.get("alternative_titles") or {}).get("titles")) or []
+    # 电影叫 titles，剧集叫 results，两种都得认
+    alt = data.get("alternative_titles") or {}
+    aliases = alt.get("titles") or alt.get("results") or []
     for region in ("US", "GB", "XWW"):
         for item in aliases:
             if item.get("iso_3166_1") == region and item.get("title"):

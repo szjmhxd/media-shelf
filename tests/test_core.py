@@ -12,6 +12,7 @@ from mediashelf import apply as apply_mod
 from mediashelf import cleanup, naming, nfo, organizer
 from mediashelf import config as cfg
 from mediashelf.probe import AudioTrack, ProbeResult
+from mediashelf.ui.workers import classify_media
 
 
 def _record(path: str, cn="阿凡达", en="Avatar", year="2009", **extra) -> dict:
@@ -367,6 +368,196 @@ class CleanupTest(unittest.TestCase):
 
     def test_missing_root_is_safe(self) -> None:
         self.assertEqual(cleanup.scan(self.tmp / "不存在"), [])
+
+
+class EpisodeParseTest(unittest.TestCase):
+    """剧集集号：四种命名格式 + 父目录季号。"""
+
+    def test_leading_number(self) -> None:
+        self.assertEqual(naming.parse_episode("01.flv"), (0, 1))
+        self.assertEqual(naming.parse_episode("02.flv"), (0, 2))
+
+    def test_bracket_number(self) -> None:
+        self.assertEqual(
+            naming.parse_episode("[DBD-Raws][Grand Blue][01][1080P][BDRip][HEVC-10bit].mkv"),
+            (0, 1),
+        )
+
+    def test_chinese_counter(self) -> None:
+        self.assertEqual(naming.parse_episode("第01话 那就是恋情的开端 4K.mp4"), (0, 1))
+
+    def test_sxxexx(self) -> None:
+        self.assertEqual(naming.parse_episode("胆大党S01E03.mp4"), (1, 3))
+
+    def test_trailing_number(self) -> None:
+        # 全职猎人重制版：集号在文件名末尾
+        self.assertEqual(naming.parse_episode("HUNTER×HUNTER(2011) 001.mkv"), (0, 1))
+        self.assertEqual(naming.parse_episode("HUNTER×HUNTER(2011) 062.mkv"), (0, 62))
+
+    def test_sequel_number_is_not_episode(self) -> None:
+        # 「阿凡达.2.mkv」的 2 是续集编号，不是第二集
+        self.assertIsNone(naming.parse_episode("阿凡达.2.mkv"))
+
+    def test_season_inside_filename(self) -> None:
+        self.assertEqual(naming.parse_episode("[Feibanyama] Dan Da Dan S2 [07][2160p].mkv"), (2, 7))
+
+    def test_movies_have_no_episode(self) -> None:
+        for name in (
+            "冰雪奇缘 (2013) 1080P.mkv",
+            "2012 (2009).mkv",
+            "The.Bad.Guys.2022.2160p.WEB-DL.x265.10bit.SDR.mkv",
+        ):
+            self.assertIsNone(naming.parse_episode(name), name)
+
+    def test_season_from_folder(self) -> None:
+        self.assertEqual(naming.parse_season("第一季"), 1)
+        self.assertEqual(naming.parse_season("第二季 抢先版"), 2)
+        self.assertEqual(naming.parse_season("胆大党S01"), 1)
+        self.assertEqual(naming.parse_season("胆大党S02"), 2)
+        self.assertEqual(naming.parse_season("Season 03"), 3)
+        self.assertEqual(naming.parse_season("全职猎人1999"), 1)
+
+    def test_series_query_from_parent(self) -> None:
+        self.assertEqual(
+            naming.guess_series_query("/a/全职猎人/全职猎人1999/01.flv")[0], "全职猎人"
+        )
+        self.assertEqual(naming.guess_series_query("/a/碧蓝之海/第一季/[x][01].mkv")[0], "碧蓝之海")
+        self.assertEqual(
+            naming.guess_series_query("/a/胆大党S01/日语特效字幕.B站版.4K/第01话x.mp4")[0],
+            "胆大党",
+        )
+
+
+class LanguageOriginalTest(unittest.TestCase):
+    """第二段名字按作品语言挑：日本用日文、英语地区用英文。"""
+
+    def test_japanese_uses_original(self) -> None:
+        meta = {"original_language": "ja", "original": "ぐらんぶる", "en": "Grand Blue"}
+        self.assertEqual(naming.language_original(meta, "碧蓝之海"), "ぐらんぶる")
+
+    def test_english_uses_original(self) -> None:
+        meta = {"original_language": "en", "original": "Zootopia", "en": "Zootopia"}
+        self.assertEqual(naming.language_original(meta, "疯狂动物城"), "Zootopia")
+
+    def test_chinese_falls_back_to_english(self) -> None:
+        meta = {
+            "original_language": "zh",
+            "original": "流浪地球",
+            "en": "The Wandering Earth",
+        }
+        self.assertEqual(naming.language_original(meta, "流浪地球"), "The Wandering Earth")
+
+    def test_same_as_cn_is_dropped(self) -> None:
+        meta = {"original_language": "ja", "original": "罗小黑战记", "en": "The Legend of Hei"}
+        self.assertEqual(naming.language_original(meta, "罗小黑战记"), "The Legend of Hei")
+
+
+class TvPlanTest(unittest.TestCase):
+    """剧集计划：Season 子目录 + SxxExx + tvshow.nfo。"""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.ep_dir = self.tmp / "碧蓝之海" / "第一季"
+        self.ep_dir.mkdir(parents=True)
+        self.video = self.ep_dir / "[DBD-Raws][Grand Blue][01].mkv"
+        self.video.write_bytes(b"x" * 1024)
+
+    def tearDown(self) -> None:
+        import shutil
+
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _record(self, path: str, kind: str, season: int, episode: int) -> dict:
+        return {
+            "path": path,
+            "probe": ProbeResult(path=path, size=1024),
+            "meta": {
+                "cn": "碧蓝之海",
+                "orig": "ぐらんぶる",
+                "en": "Grand Blue",
+                "original": "ぐらんぶる",
+                "year": "2018",
+                "tmdbid": 79166,
+                "ep_title": "深蓝",
+            },
+            "kind": kind,
+            "season": season,
+            "episode": episode,
+            "checked": True,
+            "source": "BDRip",
+            "group": "",
+            "edition": "",
+        }
+
+    def test_episode_goes_to_season_folder(self) -> None:
+        record = self._record(str(self.video), "tv", 1, 1)
+        ops = organizer.build_plan(
+            [record],
+            self.tmp,
+            template="{cn}.{orig}.S{season}E{episode}.{res}.{codec}",
+            folder_template="{cn} ({year})",
+            ep_template="{cn}.{orig}.S{season}E{episode}.{res}.{codec}",
+        )
+        moves = [op for op in ops if op.kind == "move"]
+        self.assertEqual(len(moves), 1)
+        target = Path(moves[0].dst)
+        self.assertEqual(target.parent.name, "Season 01")
+        self.assertEqual(target.parent.parent.name, "碧蓝之海 (2018)")
+        self.assertIn("S01E01", target.name)
+        self.assertIn("ぐらんぶる", target.name)
+
+    def test_episode_writes_tvshow_and_episode_nfo(self) -> None:
+        record = self._record(str(self.video), "tv", 1, 1)
+        ops = organizer.build_plan(
+            [record],
+            self.tmp,
+            template="{cn}.{orig}.S{season}E{episode}",
+            folder_template="{cn} ({year})",
+            ep_template="{cn}.{orig}.S{season}E{episode}",
+        )
+        nfo_paths = [Path(op.dst).name for op in ops if op.kind == "write_nfo"]
+        self.assertIn("tvshow.nfo", nfo_paths)
+        self.assertIn("S01E01.nfo", nfo_paths)
+
+    def test_movie_still_uses_movie_nfo(self) -> None:
+        record = self._record(str(self.video), "movie", 0, 0)
+        record["meta"] = {"cn": "碧蓝之海", "year": "2018", "tmdbid": 1}
+        ops = organizer.build_plan(
+            [record],
+            self.tmp,
+            template="{cn}.{orig}.{year}",
+            folder_template="{cn} ({year})",
+        )
+        nfo_paths = [Path(op.dst).name for op in ops if op.kind == "write_nfo"]
+        self.assertEqual(nfo_paths, ["movie.nfo"])
+
+
+class ClassifyTest(unittest.TestCase):
+    """电影/剧集判定：同目录 >=2 个不同集号才算剧集。"""
+
+    def test_two_episodes_become_tv(self) -> None:
+        files = [
+            Path("/a/碧蓝之海/第一季/01.mkv"),
+            Path("/a/碧蓝之海/第一季/02.mkv"),
+        ]
+        kinds = classify_media(files)
+        self.assertTrue(all(kinds[str(f)]["kind"] == "tv" for f in files))
+        self.assertEqual(kinds[str(files[0])]["episode"], 1)
+        self.assertEqual(kinds[str(files[1])]["episode"], 2)
+
+    def test_single_file_stays_movie(self) -> None:
+        # 《101忠狗》这类片名里带数字，单文件不能判成剧集
+        files = [Path("/a/101忠狗/101忠狗.mkv")]
+        kinds = classify_media(files)
+        self.assertEqual(kinds[str(files[0])]["kind"], "movie")
+
+    def test_season_from_parent(self) -> None:
+        files = [
+            Path("/a/碧蓝之海/第二季 抢先版/[S2][01].mkv"),
+            Path("/a/碧蓝之海/第二季 抢先版/[S2][02].mkv"),
+        ]
+        kinds = classify_media(files)
+        self.assertEqual(kinds[str(files[0])]["season"], 2)
 
 
 if __name__ == "__main__":

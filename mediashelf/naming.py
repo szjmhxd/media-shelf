@@ -13,7 +13,8 @@ from pathlib import Path
 
 FIELD_DOCS: list[tuple[str, str, str]] = [
     ("{cn}", "中文片名", "阿凡达"),
-    ("{en}", "原始/英文片名", "Avatar"),
+    ("{orig}", "语言原名（日文/英文）", "Avatar"),
+    ("{en}", "英文片名", "Avatar"),
     ("{year}", "上映年份", "2009"),
     ("{res}", "分辨率", "2160p"),
     ("{source}", "片源", "BluRay"),
@@ -23,6 +24,9 @@ FIELD_DOCS: list[tuple[str, str, str]] = [
     ("{group}", "发布组", "DreamHD"),
     ("{edition}", "版本标记", "EXTENDED"),
     ("{collection}", "系列名", "阿凡达"),
+    ("{season}", "季（剧集）", "01"),
+    ("{episode}", "集（剧集）", "02"),
+    ("{ep_title}", "集标题（剧集）", "那场决斗"),
     ("{ext}", "扩展名", "mkv"),
 ]
 
@@ -156,7 +160,7 @@ def build_fields(record: dict) -> dict[str, str]:
     path = Path(record.get("path", ""))
 
     cn = (meta.get("cn") or "").strip()
-    en = (meta.get("en") or meta.get("original") or "").strip()
+    en = (meta.get("en") or "").strip()
     year = str(meta.get("year") or "").strip()
 
     if not cn:
@@ -173,6 +177,7 @@ def build_fields(record: dict) -> dict[str, str]:
     fields = {
         "cn": cn,
         "en": en,
+        "orig": language_original(meta, cn, en),
         "year": year,
         "res": getattr(probe, "res", "") or "",
         "source": record.get("source") or (probe.source_guess() if probe else ""),
@@ -182,8 +187,37 @@ def build_fields(record: dict) -> dict[str, str]:
         "group": record.get("group") or "",
         "edition": record.get("edition") or "",
         "collection": (meta.get("collection") or "").strip(),
+        "season": str(record.get("season") or "").zfill(2) if record.get("season") else "",
+        "episode": str(record.get("episode") or "").zfill(2) if record.get("episode") else "",
+        "ep_title": (meta.get("ep_title") or record.get("ep_title") or "").strip(),
     }
     return fields
+
+
+def language_original(meta: dict, cn: str = "", en: str = "") -> str:
+    """按作品的语言挑第二段名字。
+
+    日本动画 → 日文原名（ぐらんぶる），英语片 → 英文名（Zootopia），
+    韩国片 → 韩文原名。判断依据是 TMDB 的 original_language 字段，
+    不猜文本里有没有假名——纯汉字的日文片名是存在的。
+
+    中文作品（original_language 以 zh 开头）的原名就是中文，会和 {cn}
+    重复，此时退化成英文名，否则文件名里会出来两遍一样的字。
+    """
+    language = (meta.get("original_language") or "").strip().lower()
+    original = (meta.get("original") or "").strip()
+    cn = cn or (meta.get("cn") or "").strip()
+    en = en or (meta.get("en") or "").strip()
+
+    if language.startswith("zh"):
+        picked = en
+    else:
+        picked = original or en
+    # 原名和中文名撞了（日文用汉字名时会发生），退回英文名；
+    # 连英文名也一样就只能留空，宁可少一段也不要重复写两遍
+    if picked.strip().lower() == cn.strip().lower():
+        picked = en
+    return "" if picked.strip().lower() == cn.strip().lower() else picked
 
 
 def render_filename(record: dict, template: str, ext: str | None = None) -> str:
@@ -246,6 +280,45 @@ def guess_query(path: str | Path) -> tuple[str, str]:
     return _parse_title(path.stem)
 
 
+# 剧集目录里常见的「容器名」，不是片名
+_SERIES_NOISE = re.compile(
+    r"(日语|简中|简日|双语|国语|粤语|特效字幕|B站|字幕|内封|外挂"
+    r"|4K|1080P|2160P|1080p|2160p|HDR|SDR|DV|杜比|高码|抢先|版)"
+    r".*$"
+)
+_SEASON_TAIL = re.compile(r"(第\s*[一二三四五六七八九十\d]+\s*[季部].*|[Ss]\s*\d{1,2}\s*)$")
+# 「Dan Da Dan - 01-12」「Dan Da Dan S2 - 01」这类尾巴是集号范围，不是剧名
+_EP_RANGE = re.compile(r"[\s._-]*[Ss]?\d{1,3}\s*-\s*\d{1,3}\s*$|[\s._-]+\d{1,3}\s*$")
+
+
+def guess_series_query(path: str | Path) -> tuple[str, str]:
+    """剧集的搜索词：文件名是「01.flv」「第01话…」时没有片名，得往上层目录找。
+
+    典型情况：
+      全职猎人/全职猎人1999/01.flv          → 全职猎人 (1999)
+      碧蓝之海/第一季/xxx[01].mkv            → 碧蓝之海
+      胆大党S01/日语特效字幕.B站版.4K/第01话.mp4 → 胆大党
+    """
+    path = Path(path)
+    for parent in (path.parent, path.parent.parent, path.parent.parent.parent):
+        raw = parent.name
+        if not raw or raw.strip().lower() in GENERIC_DIRS:
+            continue
+        # 顺序要紧：先去站点括号（[Feibanyama]、[IQIYI WebRip …]），
+        # 否则「2160p」这类噪音词会从括号内部把后面整段吃掉
+        cleaned = re.sub(r"[\[【][^\]】]*[\]】]", " ", raw)
+        cleaned = _SEASON_TAIL.sub("", cleaned)
+        cleaned = _EP_RANGE.sub("", cleaned)
+        cleaned = _SERIES_NOISE.sub("", cleaned)
+        cleaned = cleaned.strip(" .-_·:：")
+        if not cleaned:
+            continue
+        query, year = _parse_title(cleaned)
+        if query and len(query) >= 2:
+            return query, year
+    return guess_query(path)
+
+
 def _parse_title(raw: str) -> tuple[str, str]:
     text = raw
     # 站点前缀 [xxx]、【xxx】
@@ -292,6 +365,111 @@ def detect_edition(raw: str) -> str:
         if re.search(rf"\b{tag}\b", upper):
             return "DC" if tag == "CUT" else tag
     return ""
+
+
+# ------------------------------------------------------------------ 剧集集号
+# 剧集文件名里的集号格式五花八门。实测一个库 333 个视频里 SxxExx 出现 0 次，
+# 反倒是「01.flv」「[01]」「第01话」这种到处都是。四种都得认。
+
+# 只挡真正的技术参数。千万别把 1、2、3 放进来——那就是第一集第二集。
+# 分辨率是四位数，方括号模式的 \d{2,3} 本来也吃不下，这里的集合是第二道保险。
+_NOISE_NUMBERS = {
+    1080,
+    2160,
+    720,
+    480,
+    576,
+    3840,
+    1920,
+    1440,  # 分辨率
+    264,
+    265,  # x264 / x265
+}
+
+_EP_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # S01E02 / S1.E2 / s01e02
+    (re.compile(r"[Ss](\d{1,2})\s*[._ -]?\s*[Ee][Pp]?(\d{1,3})"), "sxxexx"),
+    # 第01话 / 第 2 集 / 第3話
+    (re.compile(r"第\s*(\d{1,3})\s*[集话話]"), "cn"),
+    # [E01] / 【Ep02】
+    (re.compile(r"[\[【(（]\s*[Ee][Pp]?(\d{1,3})\s*[\]】)）]"), "tag"),
+    # [01] / 【12】 —— 方括号里两位数，最常见的字幕组格式
+    (re.compile(r"[\[【(（]\s*(\d{2,3})\s*[\]】)）]"), "bracket"),
+    # 01.flv / 01 - 开头。注意这里吃原名不吃 stem：
+    # 「01.flv」去掉扩展名就成了「01」，结尾没有分隔符可匹配。
+    (re.compile(r"^\s*(\d{1,3})\s*[._ -]"), "leading"),
+    # 纯数字的文件名：01.flv → 01
+    (re.compile(r"^\s*(\d{1,3})\s*$"), "leading"),
+    # 集号在末尾：HUNTER×HUNTER(2011) 001.mkv → 001
+    # 必须两位以上，否则「阿凡达.2.mkv」这类续集编号会被当成集号
+    (re.compile(r"[\s._-](\d{2,3})\s*$"), "trailing"),
+    # 数字被分隔符夹着：Dan Da Dan - 01 [IQIYI...] → 01。
+    # 265 这类编码数字靠 >200 的上限挡掉，10bit 不匹配是因为后面没有分隔符
+    (re.compile(r"[\s._-](\d{2,3})[\s._\[(（【]"), "mid"),
+]
+
+_CN_DIGITS = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+    "十一": 11,
+    "十二": 12,
+}
+
+_SEASON_PATTERNS: list[re.Pattern] = [
+    # 「第二季」「第 2 部」——中文数字在中文字幕组命名里比阿拉伯数字更常见
+    re.compile(r"第\s*(\d{1,2}|十一|十二|[一二三四五六七八九十])\s*[季部]"),
+    re.compile(r"[Ss]eason\s*(\d{1,2})", re.I),
+    re.compile(r"[Ss](\d{1,2})\s*$"),
+    re.compile(r"[Ss](\d{1,2})\s*[^Ee\d]"),
+]
+
+
+def parse_episode(name: str) -> tuple[int, int] | None:
+    """从文件名里解出 (季, 集)。解不出返回 None。
+
+    「[DBD-Raws][Grand Blue][01][1080P][BDRip]」这种，方括号里既有集号也有
+    分辨率，靠 _NOISE_NUMBERS 挡住 1080 之类。
+    """
+    text = name or ""
+    stem = Path(text).stem
+    for pattern, kind in _EP_PATTERNS:
+        # leading 系列要看到「01.flv」里的点，只能用原名
+        subject = text if kind == "leading" else stem
+        for match in pattern.finditer(subject):
+            if kind == "sxxexx":
+                season, episode = int(match.group(1)), int(match.group(2))
+            else:
+                episode = int(match.group(1))
+                season = 0  # 稍后由父目录补
+            if episode in _NOISE_NUMBERS or episode > 200:
+                continue
+            # 季号优先从文件名找（「Grand Blue S2 [07]」的 S2 就在文件名里），
+            # 找不到再由调用方拿父目录兜底
+            if season == 0:
+                season = parse_season(stem, 0)
+            return season, episode
+    return None
+
+
+def parse_season(dir_name: str, fallback: int = 1) -> int:
+    """从父目录名推季号：「第一季」「Season 02」「胆大党S01」都能认。"""
+    text = (dir_name or "").strip()
+    for pattern in _SEASON_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            token = match.group(1)
+            value = _CN_DIGITS.get(token) if not token.isdigit() else int(token)
+            if value and 1 <= value <= 50:
+                return value
+    return fallback
 
 
 def normalize_collection(name: str) -> str:

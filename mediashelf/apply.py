@@ -185,7 +185,22 @@ def _do_nfo(op: Op) -> str:
     if not meta:
         return "无元数据，跳过"
     path = Path(op.dst)
-    nfo_mod.write_nfo(path.parent, meta, name=path.name, art=bool(meta.get("poster")))
+    kind = op.payload.get("kind") or "movie"
+
+    if kind == "tv_episode":
+        content = nfo_mod.build_episode_nfo(
+            meta,
+            int(op.payload.get("season") or 1),
+            int(op.payload.get("episode") or 0),
+            op.payload.get("ep_title") or "",
+        )
+    elif kind == "tv_show":
+        content = nfo_mod.build_tvshow_nfo(meta, art=bool(meta.get("poster")))
+    else:
+        content = nfo_mod.build_nfo(meta, art=bool(meta.get("poster")))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
     return "已写入"
 
 

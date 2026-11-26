@@ -118,6 +118,7 @@ def build_plan(
     collection_suffix: str = "Collection",
     write_nfo: bool = True,
     download_images: bool = True,
+    ep_template: str = "",
 ) -> list[Op]:
     """按记录生成计划。
 
@@ -128,6 +129,8 @@ def build_plan(
     taken: dict[str, str] = {}
     # collection_id / 归一化名 → 目录名。同一系列只允许一个目录。
     collection_dirs: dict[str, str] = {}
+    # 剧集的 tvshow.nfo 和海报按剧去重，同一部剧只写一次
+    tvshow_written: set[str] = set()
 
     for record in records:
         if not record.get("checked", True):
@@ -136,22 +139,34 @@ def build_plan(
         has_meta = bool(meta.get("cn") or meta.get("en"))
 
         video = Path(record["path"])
-        filename = naming.render_filename(record, template)
+        is_tv = record.get("kind") == "tv"
+
+        # 剧集用 SxxExx 模板，电影用普通模板
+        active_template = ep_template if (is_tv and ep_template) else template
+        filename = naming.render_filename(record, active_template)
         if not filename:
             continue
 
         if organize:
             folder_name = naming.render_folder(record, folder_template)
-            target_dir = root / folder_name
-            collection = naming.normalize_collection(meta.get("collection") or "")
-            if group_collections and collection:
-                target_dir = (
-                    root
-                    / _collection_dir(
-                        collection, meta.get("collection_id"), collection_suffix, collection_dirs
+            if is_tv:
+                # 剧集标准结构：剧名 (年)/Season 01/剧名 - S01E01.mkv
+                season_no = int(record.get("season") or 1)
+                target_dir = root / folder_name / f"Season {season_no:02d}"
+            else:
+                target_dir = root / folder_name
+                collection = naming.normalize_collection(meta.get("collection") or "")
+                if group_collections and collection:
+                    target_dir = (
+                        root
+                        / _collection_dir(
+                            collection,
+                            meta.get("collection_id"),
+                            collection_suffix,
+                            collection_dirs,
+                        )
+                        / folder_name
                     )
-                    / folder_name
-                )
         else:
             target_dir = video.parent
 
@@ -183,37 +198,93 @@ def build_plan(
                 )
 
         if write_nfo and has_meta:
-            ops.append(
-                Op(
-                    "write_nfo",
-                    "",
-                    str(target_dir / nfo_mod.NFO_NAME),
-                    f"{meta.get('cn') or meta.get('en')} ({meta.get('year', '')})",
-                    {"meta": meta},
-                    owner=str(video),
+            if is_tv:
+                season_no = int(record.get("season") or 1)
+                episode_no = int(record.get("episode") or 0)
+                ops.append(
+                    Op(
+                        "write_nfo",
+                        "",
+                        str(target_dir / f"S{season_no:02d}E{episode_no:02d}.nfo"),
+                        f"{meta.get('cn')} S{season_no:02d}E{episode_no:02d}",
+                        {
+                            "meta": meta,
+                            "kind": "tv_episode",
+                            "season": season_no,
+                            "episode": episode_no,
+                            "ep_title": record.get("ep_title") or meta.get("ep_title") or "",
+                        },
+                        owner=str(video),
+                    )
                 )
-            )
-            if download_images:
-                if meta.get("poster"):
+                # 剧根的 tvshow.nfo 和海报：整部剧只写一次
+                show_key = str(meta.get("tmdbid") or meta.get("cn") or folder_name)
+                if show_key not in tvshow_written:
+                    tvshow_written.add(show_key)
+                    show_dir = target_dir.parent
                     ops.append(
                         Op(
-                            "download",
-                            meta["poster"],
-                            str(target_dir / "poster.jpg"),
-                            "海报",
+                            "write_nfo",
+                            "",
+                            str(show_dir / nfo_mod.TVSHOW_NAME),
+                            f"{meta.get('cn')} ({meta.get('year', '')})",
+                            {"meta": meta, "kind": "tv_show"},
                             owner=str(video),
                         )
                     )
-                if meta.get("backdrop"):
-                    ops.append(
-                        Op(
-                            "download",
-                            meta["backdrop"],
-                            str(target_dir / "fanart.jpg"),
-                            "背景图",
-                            owner=str(video),
-                        )
+                    if download_images:
+                        if meta.get("poster"):
+                            ops.append(
+                                Op(
+                                    "download",
+                                    meta["poster"],
+                                    str(show_dir / "poster.jpg"),
+                                    "海报",
+                                    owner=str(video),
+                                )
+                            )
+                        if meta.get("backdrop"):
+                            ops.append(
+                                Op(
+                                    "download",
+                                    meta["backdrop"],
+                                    str(show_dir / "fanart.jpg"),
+                                    "背景图",
+                                    owner=str(video),
+                                )
+                            )
+            else:
+                ops.append(
+                    Op(
+                        "write_nfo",
+                        "",
+                        str(target_dir / nfo_mod.NFO_NAME),
+                        f"{meta.get('cn') or meta.get('en')} ({meta.get('year', '')})",
+                        {"meta": meta},
+                        owner=str(video),
                     )
+                )
+                if download_images:
+                    if meta.get("poster"):
+                        ops.append(
+                            Op(
+                                "download",
+                                meta["poster"],
+                                str(target_dir / "poster.jpg"),
+                                "海报",
+                                owner=str(video),
+                            )
+                        )
+                    if meta.get("backdrop"):
+                        ops.append(
+                            Op(
+                                "download",
+                                meta["backdrop"],
+                                str(target_dir / "fanart.jpg"),
+                                "背景图",
+                                owner=str(video),
+                            )
+                        )
 
     return ops
 

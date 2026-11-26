@@ -36,6 +36,40 @@ def _similar(a: str, b: str) -> float:
     return score
 
 
+def classify_media(files: list[Path]) -> dict[str, dict]:
+    """按目录聚类判断电影还是剧集，并解出季/集。
+
+    判定规则偏保守：同一个目录里出现 >=2 个不同集号才算剧集。
+    单个文件就算名字里带「01」也可能是《101忠狗》这类片名，
+    误判成剧集会把电影搬进 Season 01，收拾起来比重命名麻烦得多。
+    """
+    groups: dict[Path, list[Path]] = {}
+    for file in files:
+        groups.setdefault(file.parent, []).append(file)
+
+    out: dict[str, dict] = {}
+    for parent, items in groups.items():
+        parsed: list[tuple[Path, tuple[int, int]]] = []
+        for file in items:
+            hit = naming.parse_episode(file.name)
+            if hit:
+                parsed.append((file, hit))
+        distinct = {episode for _file, (_season, episode) in parsed}
+        is_tv = len(parsed) >= 2 and len(distinct) >= 2
+
+        for file in items:
+            hit = naming.parse_episode(file.name)
+            season, episode = hit if hit else (0, 0)
+            if is_tv and season == 0:
+                season = naming.parse_season(parent.name, 1)
+            out[str(file)] = {
+                "kind": "tv" if is_tv else "movie",
+                "season": season if is_tv else 0,
+                "episode": episode if is_tv else 0,
+            }
+    return out
+
+
 class ScanWorker(QThread):
     progress = Signal(int, int, str)
     row_ready = Signal(object)
@@ -50,6 +84,7 @@ class ScanWorker(QThread):
         # NAS / 机械盘上并发 4 路通常比串行快 2~3 倍；再高会互相抢带宽
         self.workers = max(1, min(int(workers or 4), 16))
         self._stop = False
+        self.kinds: dict[str, dict] = {}
 
     def stop(self) -> None:
         self._stop = True
@@ -58,6 +93,7 @@ class ScanWorker(QThread):
         if self._stop:  # 已请求停止：排队中的任务直接跳过，别让线程池拖着界面
             return None
         result = probe(video, self.ffprobe)
+        info = self.kinds.get(str(video)) or {}
         return index, {
             "path": str(video),
             "name": video.name,
@@ -67,6 +103,9 @@ class ScanWorker(QThread):
             "source": result.source_guess(),
             "group": naming.detect_group(video.name) or naming.detect_group(video.parent.name),
             "edition": naming.detect_edition(video.name),
+            "kind": info.get("kind", "movie"),
+            "season": info.get("season", 0),
+            "episode": info.get("episode", 0),
             "checked": True,
             "status": "待识别" if not result.error else f"探测失败：{result.error}",
             "target": "",
@@ -78,6 +117,8 @@ class ScanWorker(QThread):
         if not total:
             self.done.emit(0)
             return
+        # 先定性：哪些是剧集、各自的季/集号
+        self.kinds = classify_media(files)
 
         # 第一阶段：先把文件铺到表格里，界面立刻有东西看。
         # 探测一个 NAS 上的 50 GB 文件要一两秒，串起来就是两分钟空表格。
@@ -87,6 +128,7 @@ class ScanWorker(QThread):
                 size = video.stat().st_size
             except OSError:
                 size = 0
+            info = self.kinds.get(str(video)) or {}
             self.row_ready.emit(
                 {
                     "path": str(video),
@@ -95,6 +137,9 @@ class ScanWorker(QThread):
                     "probe": None,
                     "meta": {},
                     "source": "",
+                    "kind": info.get("kind", "movie"),
+                    "season": info.get("season", 0),
+                    "episode": info.get("episode", 0),
                     "group": naming.detect_group(video.name)
                     or naming.detect_group(video.parent.name),
                     "edition": naming.detect_edition(video.name),
@@ -194,27 +239,27 @@ class IdentifyWorker(QThread):
             self.done.emit(matched, pending)
 
     def _identify_one(self, index: int, record: dict, matched: int, pending: int):
-        query, year = naming.guess_query(record["path"])
+        is_tv = record.get("kind") == "tv"
+        # 剧集的文件名是「01.flv」「第01话…」，片名要从父目录取
+        if is_tv:
+            query, year = naming.guess_series_query(record["path"])
+        else:
+            query, year = naming.guess_query(record["path"])
         if not query:
             self.row_updated.emit(index - 1, {}, "无匹配：文件名里没有片名")
             return matched, pending + 1
 
-        results = self.client.search(query, year)
+        results = self.client.search_tv(query, year) if is_tv else self.client.search(query, year)
         if not results:
             self.row_updated.emit(index - 1, {"query": query}, "无匹配")
             return matched, pending + 1
 
-        # 先用搜索结果的标题粗排，只对最像的 2 个取详情。
-        # 每个详情都是一次网络请求，53 部片子不能对每个候选都查。
-        coarse = sorted(
-            results,
-            key=lambda item: (
-                _similar(query, item.get("cn", ""))
-                + (0.25 if year and year == item.get("year") else 0)
-            ),
-            reverse=True,
-        )
-        ranked = coarse[:1] if _similar(query, coarse[0].get("cn", "")) >= 0.92 else coarse[:2]
+        # 候选窗口用 TMDB 的原始顺序，不要按相似度重排后再截断。
+        # 查询词是英文（Dan Da Dan）而 TMDB 返回中文名时，相关片的
+        # 标题相似度是 0，会被自己的排序挤出窗口，最后匹配到一部无关片。
+        # 相似度只用来在候选里挑最好的那个。
+        top_score = max(_similar(query, item.get("cn", "")) for item in results[:1])
+        ranked = results[:1] if top_score >= 0.92 else results[:3]
 
         best: dict | None = None
         best_score = 0.0
@@ -222,7 +267,10 @@ class IdentifyWorker(QThread):
         best_year_ok = False
         for candidate in ranked:
             try:
-                full = self.client.details(candidate["id"])
+                if is_tv:
+                    full = self.client.tv_details(candidate["id"])
+                else:
+                    full = self.client.details(candidate["id"])
             except Exception:  # noqa: BLE001 - 单个候选失败不影响其余
                 full = dict(candidate)
             cn = full.get("cn") or candidate.get("cn", "")
@@ -230,7 +278,10 @@ class IdentifyWorker(QThread):
             score = max(_similar(query, cn), _similar(query, en))
             got = str(full.get("year") or candidate.get("year") or "")
             year_ok = bool(year) and got == year
-            weighted = score + (0.3 if year_ok else 0.0)
+            # 年份不匹配要扣分，不能只给匹配的加分：《长发公主》(2010) 的
+            # 标题相似度输《芭比之长发公主》(2002)，靠年份对不上才翻得回来
+            year_penalty = -0.2 if (year and got and not year_ok) else 0.0
+            weighted = score + (0.3 if year_ok else 0.0) + year_penalty
             if weighted > best_weighted:
                 best, best_score, best_weighted, best_year_ok = full, score, weighted, year_ok
 
@@ -255,6 +306,20 @@ class IdentifyWorker(QThread):
                 best = self.client.enrich(best)
             except Exception:  # noqa: BLE001 - 简介拿不到不影响改名
                 pass
+
+        # 剧集补集标题。同一季的 season_details 有磁盘缓存，12 集只打一次请求
+        if is_tv and record.get("season") and record.get("episode"):
+            try:
+                episodes = self.client.season_details(best["id"], int(record["season"]))
+                want = int(record["episode"])
+                for item in episodes:
+                    if item.get("number") == want:
+                        best = dict(best)
+                        best["ep_title"] = item.get("title") or ""
+                        break
+            except Exception:  # noqa: BLE001 - 集标题拿不到不影响改名
+                pass
+
         self.row_updated.emit(index - 1, best, status)
         return matched + 1, pending
 

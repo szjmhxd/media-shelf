@@ -411,9 +411,10 @@ class MainWindow(QMainWindow):
         new_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         self.table.setItem(row, COL_NEW, new_item)
 
-        status = QTableWidgetItem(record.get("status", "待识别"))
+        status_text = record.get("status", "待识别")
+        status = QTableWidgetItem(_status_label(record, status_text))
         status.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-        color = STATUS_COLORS.get(record.get("status", ""))
+        color = STATUS_COLORS.get(status_text)
         if color:
             status.setForeground(QColor(color))
         self.table.setItem(row, COL_STATUS, status)
@@ -512,7 +513,7 @@ class MainWindow(QMainWindow):
             en_item.setToolTip(meta.get("en") or meta.get("original", ""))
             self.table.item(index, COL_YEAR).setText(str(meta.get("year") or ""))
         status_item = self.table.item(index, COL_STATUS)
-        status_item.setText(status)
+        status_item.setText(_status_label(record, status))
         color = STATUS_COLORS.get(status)
         if color:
             status_item.setForeground(QColor(color))
@@ -679,6 +680,7 @@ class MainWindow(QMainWindow):
             collection_suffix=self.config.get("collection_suffix", "Collection"),
             write_nfo=self.nfo_check.isChecked(),
             download_images=self.image_check.isChecked(),
+            ep_template=cfg.DEFAULT_EP_TEMPLATE,
         )
 
     def _busy(self) -> bool:
@@ -902,6 +904,17 @@ def _open_folder(path: Path) -> None:
     from PySide6.QtGui import QDesktopServices
 
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+
+def _status_label(record: dict, status: str) -> str:
+    """剧集在状态前面带上 SxxE0x，一眼能对上是哪一集。"""
+    if record.get("kind") != "tv":
+        return status
+    season = int(record.get("season") or 0)
+    episode = int(record.get("episode") or 0)
+    if not (season or episode):
+        return status
+    return f"S{season:02d}E{episode:02d} · {status}"
 
 
 def _wrap_text(text: str, width: int = 96) -> list[str]:

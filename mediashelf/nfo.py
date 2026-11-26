@@ -8,6 +8,7 @@ from typing import Any
 from xml.sax.saxutils import escape
 
 NFO_NAME = "movie.nfo"
+TVSHOW_NAME = "tvshow.nfo"
 
 
 def _text(value: Any) -> str:
@@ -78,6 +79,78 @@ def build_nfo(meta: dict[str, Any], art: bool = True) -> str:
 
     lines.append("</movie>")
     return "\n".join(lines) + "\n"
+
+
+def build_tvshow_nfo(meta: dict[str, Any], art: bool = True) -> str:
+    """剧根目录的 tvshow.nfo。Jellyfin / Emby / Kodi 都按这个识别剧。"""
+    title = meta.get("cn") or meta.get("en") or ""
+    original = meta.get("original") or meta.get("en") or ""
+    lines: list[str] = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>', "<tvshow>"]
+    lines.append(f"  <title>{_text(title)}</title>")
+    if original:
+        lines.append(f"  <originaltitle>{_text(original)}</originaltitle>")
+    if title:
+        lines.append(f"  <sorttitle>{_text(title)}</sorttitle>")
+    if meta.get("year"):
+        lines.append(f"  <year>{_text(meta['year'])}</year>")
+    if meta.get("release_date"):
+        lines.append(f"  <premiered>{_text(meta['release_date'])}</premiered>")
+    if meta.get("rating"):
+        lines.append(f"  <rating>{meta['rating']:.1f}</rating>")
+    if meta.get("votes"):
+        lines.append(f"  <votes>{int(meta['votes'])}</votes>")
+    if meta.get("overview"):
+        lines.append(f"  <plot>{_text(meta['overview'])}</plot>")
+        lines.append(f"  <outline>{_text(meta['overview'][:200])}</outline>")
+    for genre in meta.get("genres") or []:
+        lines.append(f"  <genre>{_text(genre)}</genre>")
+    for creator in meta.get("directors") or []:
+        lines.append(f"  <creator>{_text(creator)}</creator>")
+    if meta.get("tmdbid"):
+        lines.append(f"  <tmdbid>{_text(meta['tmdbid'])}</tmdbid>")
+        lines.append(f'  <uniqueid type="tmdb" default="true">{_text(meta["tmdbid"])}</uniqueid>')
+    if meta.get("imdbid"):
+        lines.append(f"  <imdbid>{_text(meta['imdbid'])}</imdbid>")
+        lines.append(f'  <uniqueid type="imdb">{_text(meta["imdbid"])}</uniqueid>')
+    for country in meta.get("country") or []:
+        lines.append(f"  <country>{_text(country)}</country>")
+    if art:
+        lines.append("  <art>")
+        if meta.get("poster"):
+            lines.append("    <poster>poster.jpg</poster>")
+        if meta.get("backdrop"):
+            lines.append("    <fanart>fanart.jpg</fanart>")
+        lines.append("  </art>")
+    lines.append("</tvshow>")
+    return "\n".join(lines)
+
+
+def build_episode_nfo(
+    meta: dict[str, Any],
+    season: int,
+    episode: int,
+    ep_title: str = "",
+) -> str:
+    """单集 nfo。文件名建议 S01E01.nfo，和视频同名更容易被刮削器匹配。"""
+    show = meta.get("cn") or meta.get("en") or ""
+    lines: list[str] = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        "<episodedetails>",
+    ]
+    lines.append(f"  <title>{_text(ep_title or f'第 {episode} 集')}</title>")
+    lines.append(f"  <showtitle>{_text(show)}</showtitle>")
+    lines.append(f"  <season>{int(season)}</season>")
+    lines.append(f"  <episode>{int(episode)}</episode>")
+    if meta.get("year"):
+        lines.append(f"  <year>{_text(meta['year'])}</year>")
+    if meta.get("rating"):
+        lines.append(f"  <rating>{meta['rating']:.1f}</rating>")
+    if ep_title and meta.get("overview"):
+        lines.append(f"  <plot>{_text(meta['overview'])}</plot>")
+    if meta.get("tmdbid"):
+        lines.append(f'  <uniqueid type="tmdb" default="true">{_text(meta["tmdbid"])}</uniqueid>')
+    lines.append("</episodedetails>")
+    return "\n".join(lines)
 
 
 def write_nfo(folder: Path, meta: dict[str, Any], name: str = NFO_NAME, art: bool = True) -> Path:
