@@ -45,10 +45,32 @@ from .workers import (
     ScanWorker,
 )
 
-COLUMNS = ["", "文件", "大小", "中文名", "英文名", "年份", "片源", "发布组", "新文件名", "状态", "类型"]
-COL_CHECK, COL_FILE, COL_SIZE, COL_CN, COL_EN, COL_YEAR, COL_SRC, COL_GROUP, COL_NEW, COL_STATUS, COL_TYPE = (
-    range(11)
-)
+COLUMNS = [
+    "",
+    "文件",
+    "大小",
+    "中文名",
+    "英文名",
+    "年份",
+    "片源",
+    "发布组",
+    "新文件名",
+    "状态",
+    "类型",
+]
+(
+    COL_CHECK,
+    COL_FILE,
+    COL_SIZE,
+    COL_CN,
+    COL_EN,
+    COL_YEAR,
+    COL_SRC,
+    COL_GROUP,
+    COL_NEW,
+    COL_STATUS,
+    COL_TYPE,
+) = range(11)
 
 EDIT_FIELDS = {
     COL_CN: ("meta", "cn"),
@@ -197,10 +219,21 @@ class MainWindow(QMainWindow):
         # Ignored 让标签不参与最小宽度计算，超出部分裁掉，全文放 tooltip。
         self.field_summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
+        # 状态筛选：库一上千行，手工滚着找「无匹配」不现实，按状态一键过滤。
+        # 只隐藏显示行，不影响勾选状态和执行范围。
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems(["全部状态", "无匹配", "需人工确认", "已匹配"])
+        self.filter_combo.setToolTip(
+            "按识别状态筛选表格显示的行。\n不影响勾选，被隐藏的行仍按勾选状态参与执行。"
+        )
+        self.filter_combo.currentIndexChanged.connect(self._apply_filter)
+
         row3 = QHBoxLayout()
         for box in (self.organize_check, self.collection_check, self.nfo_check, self.image_check):
             row3.addWidget(box)
         row3.addStretch(1)
+        row3.addWidget(QLabel("筛选"))
+        row3.addWidget(self.filter_combo)
         row3.addWidget(self.field_summary)
         layout.addLayout(row3)
 
@@ -366,6 +399,8 @@ class MainWindow(QMainWindow):
 
         self.records.clear()
         self.table.setRowCount(0)
+        # 新扫描的行全是「待识别」，旧筛选会把整表藏光，归位到「全部状态」
+        self.filter_combo.setCurrentIndex(0)
         self.log(f"开始扫描 {self.root}")
         self.progress.setRange(0, 0)
 
@@ -426,6 +461,7 @@ class MainWindow(QMainWindow):
         self._loading = False
 
         self.refresh_preview(row)
+        self._apply_filter()
 
     def _fill_record(self, index: int, record: dict) -> None:
         """探测完成后回填这一行的技术参数。"""
@@ -446,6 +482,7 @@ class MainWindow(QMainWindow):
             status_item.setForeground(QColor(color))
         self._loading = False
         self.refresh_preview(index)
+        self._apply_filter()
 
     def _scan_done(self, count: int) -> None:
         self.progress.setRange(0, 1)
@@ -527,6 +564,7 @@ class MainWindow(QMainWindow):
             status_item.setForeground(QColor(color))
         self._loading = False
         self.refresh_preview(index)
+        self._apply_filter()
 
     def _identify_done(self, matched: int, pending: int) -> None:
         self.progress.setRange(0, 1)
@@ -557,6 +595,23 @@ class MainWindow(QMainWindow):
                 self.log("提示：检查 TMDB Key 是否有效，或网络是否需要代理。")
 
     # ------------------------------------------------------------------ 表格
+    def _apply_filter(self) -> None:
+        """按状态列筛选显示行（仅隐藏，不动数据和勾选）。"""
+        want = self.filter_combo.currentText()
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, COL_STATUS)
+            text = item.text() if item else ""
+            if want == "全部状态":
+                show = True
+            elif want == "无匹配":
+                show = "无匹配" in text
+            elif want == "需人工确认":
+                show = "需人工确认" in text
+            else:  # 已匹配
+                # 「无匹配」「需人工确认」里也含「匹配」二字，要排除掉
+                show = "已匹配" in text and "需人工确认" not in text
+            self.table.setRowHidden(row, not show)
+
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         if self._loading:
             return
