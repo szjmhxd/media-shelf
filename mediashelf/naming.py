@@ -125,6 +125,9 @@ def render(template: str, fields: dict[str, str], is_filename: bool = True) -> s
     except (ValueError, IndexError, KeyError):
         text = template
 
+    # 空字段留下的空括号直接去掉：「碧蓝之海真人版 ()」要比「碧蓝之海真人版」难看得多
+    text = re.sub(r"[\(（]\s*[\)）]", "", text)
+
     text = text.replace("\u3000", " ")
     if is_filename:
         # 点分隔的模板里，标题内部的空格也统一换成点，
@@ -286,7 +289,11 @@ _SERIES_NOISE = re.compile(
     r"|4K|1080P|2160P|1080p|2160p|HDR|SDR|DV|杜比|高码|抢先|版)"
     r".*$"
 )
-_SEASON_TAIL = re.compile(r"(第\s*[一二三四五六七八九十\d]+\s*[季部].*|[Ss]\s*\d{1,2}\s*)$")
+# 「第二季」「S2」「Season 01」都是容器名尾巴，不是剧名。
+# （只认 S+数字、不认裸 S 结尾，否则「KIDS」会被啃掉尾巴。）
+_SEASON_TAIL = re.compile(
+    r"(第\s*[一二三四五六七八九十\d]+\s*[季部].*|[Ss](?:eason)?\s*\d{1,2}\s*)$"
+)
 # 「Dan Da Dan - 01-12」「Dan Da Dan S2 - 01」这类尾巴是集号范围，不是剧名
 _EP_RANGE = re.compile(r"[\s._-]*[Ss]?\d{1,3}\s*-\s*\d{1,3}\s*$|[\s._-]+\d{1,3}\s*$")
 
@@ -311,7 +318,9 @@ def guess_series_query(path: str | Path) -> tuple[str, str]:
         cleaned = _EP_RANGE.sub("", cleaned)
         cleaned = _SERIES_NOISE.sub("", cleaned)
         cleaned = cleaned.strip(" .-_·:：")
-        if not cleaned:
+        # 整理过的库目录是「剧名 (年)/Season 01/…」，Season 层是容器不是剧名；
+        # 当成查询词去搜会匹配到毫不相干的片（拿「Season」搜出过《寻爱交配季》）。
+        if not cleaned or re.fullmatch(r"(?i)seasons?|specials?|extras?", cleaned):
             continue
         query, year = _parse_title(cleaned)
         if query and len(query) >= 2:
@@ -356,6 +365,72 @@ def _parse_title(raw: str) -> tuple[str, str]:
     kept = [p for p in parts if p and p.lower() not in TAG_WORDS]
     name = " ".join(kept).strip(" -")
     return name, year
+
+
+# TMDB 标题里不会带「真人版」这类媒介后缀，留着搜不到任何东西。
+# 「碧蓝之海真人版」在 TMDB 上的条目就叫《碧蓝之海》（ぐらんぶる，2020 电影）。
+_EDITION_TAIL = re.compile(
+    r"(?:真人版|动画版|動畫版|動画版|剧场版|劇場版|电影版|電視版|电视版"
+    r"|Live[\s._-]?Action)$",
+    re.IGNORECASE,
+)
+
+
+def strip_edition_suffix(query: str) -> str:
+    """「碧蓝之海真人版」→「碧蓝之海」；没有后缀就原样返回。"""
+    return _EDITION_TAIL.sub("", (query or "").strip()).strip(" .-_·:：")
+
+
+def _title_part(raw: str) -> str:
+    """年份之前、去掉站点括号之后的那截才是片名材料，后面的全是发布参数。"""
+    text = re.sub(r"[\[【][^\]】]*[\]】]", " ", raw)
+    match = re.search(r"(?<![0-9])(?:19|20)\d{2}(?![0-9])", text)
+    return text[: match.start()] if match else text
+
+
+def _norm_key(text: str) -> str:
+    return re.sub(r"[^0-9a-z一-鿿]+", "", (text or "").lower())
+
+
+def query_variants(path: str | Path, primary: str = "") -> list[str]:
+    """文件名里的其他标题段，用作补充搜索词（最多 2 个）。
+
+    「长发公主.Tangled.2010…」只拿中文段搜索时，TMDB 返回的是
+    《芭比之长发公主》——《魔发奇缘》的官方译名和「长发公主」对不上，
+    中文查询词根本搜不到它。文件名里的英文/日文原名段补搜一轮才能命中。
+    这里把年份之前的连续拉丁文段拼成查询词；中文段归主查询词管。
+    """
+    path = Path(path)
+    seen = {_norm_key(primary)}
+    out: list[str] = []
+    for raw in (path.stem, path.parent.name):
+        segments = [seg.strip(" .-_·:：") for seg in re.split(r"[._\[\]()（）]+", _title_part(raw))]
+        run: list[str] = []
+        for seg in segments:
+            if not seg:
+                continue
+            is_word = (
+                re.fullmatch(r"[A-Za-z][A-Za-z0-9'&:：.-]*", seg) is not None
+                and seg.lower() not in TAG_WORDS
+                # S01E01 这类集号是拉丁文但不是标题，别拿去当查询词
+                and re.fullmatch(r"[Ss]\d{1,3}[Ee][Pp]?\d{1,3}", seg) is None
+                and re.fullmatch(r"[Ss](?:eason)?\s*\d{1,2}", seg) is None
+            )
+            if is_word:
+                run.append(seg)
+                continue
+            if run:
+                word = " ".join(run)
+                if len(word) >= 3 and _norm_key(word) not in seen:
+                    seen.add(_norm_key(word))
+                    out.append(word)
+                run = []
+        if run:
+            word = " ".join(run)
+            if len(word) >= 3 and _norm_key(word) not in seen:
+                seen.add(_norm_key(word))
+                out.append(word)
+    return out[:2]
 
 
 def detect_edition(raw: str) -> str:

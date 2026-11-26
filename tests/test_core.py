@@ -560,5 +560,60 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(kinds[str(files[0])]["season"], 2)
 
 
+class MatchQueryTest(unittest.TestCase):
+    """译名对不上时的补救：后缀剥离 + 原名段补搜词。"""
+
+    def test_variants_pick_original_title_segment(self) -> None:
+        # 《长发公主》TMDB 官方译名是《魔发奇缘》，中文查询词搜不到；
+        # 文件名里的 Tangled 才是命中它的钥匙
+        path = (
+            "N:/动漫/长发公主 (2010) 1080P/"
+            "长发公主.Tangled.2010.BluRay.1080p.x265.10bit.3Audio.MNHD-FRDS.mkv"
+        )
+        self.assertEqual(naming.query_variants(path, "长发公主"), ["Tangled"])
+
+    def test_variants_join_latin_run(self) -> None:
+        path = "N:/电影/The.Matrix.1999.BluRay.mkv"
+        # 主查询词已经是 The Matrix，补充词去重后不该重复
+        self.assertEqual(naming.query_variants(path, "The Matrix"), [])
+
+    def test_variants_skip_noise_segments(self) -> None:
+        path = "N:/x/碧蓝之海真人版.HDRip.1080p.x264.AAC.2.0.mp4"
+        self.assertEqual(naming.query_variants(path, "碧蓝之海真人版"), [])
+
+    def test_variants_skip_episode_tokens(self) -> None:
+        # S01E01 是拉丁文，但不是标题，不能当补充查询词
+        path = "N:/x/碧蓝之海 (2018)/Season 01/碧蓝之海.ぐらんぶる.S01E01.1080p.x265.10bit.mkv"
+        self.assertEqual(naming.query_variants(path, "碧蓝之海"), [])
+
+    def test_series_query_skips_season_folder(self) -> None:
+        # 整理过的库：剧名 (年)/Season 01/xx.mkv —— Season 层是容器不是剧名，
+        # 拿「Season」当查询词会搜出毫不相干的片
+        path = "N:/x/碧蓝之海 (2018)/Season 01/碧蓝之海.ぐらんぶる.S01E01.1080p.x265.10bit.mkv"
+        self.assertEqual(naming.guess_series_query(path), ("碧蓝之海", "2018"))
+
+    def test_series_name_ending_with_s_is_kept(self) -> None:
+        # 「KIDS」这种以 S 结尾的剧名不能被季号尾巴啃掉
+        path = "N:/x/KIDS/KIDS - 01.mkv"
+        self.assertEqual(naming.guess_series_query(path), ("KIDS", ""))
+
+    def test_strip_edition_suffix(self) -> None:
+        self.assertEqual(naming.strip_edition_suffix("碧蓝之海真人版"), "碧蓝之海")
+        self.assertEqual(naming.strip_edition_suffix("Grand Blue Live Action"), "Grand Blue")
+        # 没有后缀就原样返回
+        self.assertEqual(naming.strip_edition_suffix("碧蓝之海"), "碧蓝之海")
+
+    def test_empty_year_folder_has_no_parens(self) -> None:
+        record = {"path": "N:/动漫/碧蓝之海真人版 ()/碧蓝之海真人版.HDRip.mp4", "meta": {}}
+        self.assertEqual(
+            naming.render_folder(record, cfg.DEFAULT_FOLDER_TEMPLATE), "碧蓝之海真人版"
+        )
+
+    def test_empty_year_filename_has_no_parens(self) -> None:
+        record = {"path": "N:/x/碧蓝之海真人版.mkv", "meta": {}}
+        name = naming.render_filename(record, "{cn} ({year}).{source}")
+        self.assertEqual(name, "碧蓝之海真人版.mkv")
+
+
 if __name__ == "__main__":
     unittest.main()

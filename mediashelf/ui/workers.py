@@ -238,6 +238,67 @@ class IdentifyWorker(QThread):
                 pass
             self.done.emit(matched, pending)
 
+    def _window(self, query: str, results: list[dict]) -> list[dict]:
+        """候选窗口用 TMDB 的原始顺序，不要按相似度重排后再截断。
+
+        查询词是英文（Dan Da Dan）而 TMDB 返回中文名时，相关片的
+        标题相似度是 0，会被自己的排序挤出窗口，最后匹配到一部无关片。
+        相似度只用来在候选里挑最好的那个。
+        """
+        top = max(
+            max(_similar(query, item.get("cn", "")), _similar(query, item.get("original", "")))
+            for item in results[:1]
+        )
+        return results[:1] if top >= 0.92 else results[:3]
+
+    def _pick(
+        self, candidates: list[dict], queries: list[str], year: str, is_tv: bool
+    ) -> tuple[dict | None, float, bool]:
+        best: dict | None = None
+        best_score = 0.0
+        best_weighted = -1.0
+        best_year_ok = False
+        for candidate in candidates:
+            try:
+                if is_tv:
+                    full = self.client.tv_details(candidate["id"])
+                else:
+                    full = self.client.details(candidate["id"])
+            except Exception:  # noqa: BLE001 - 单个候选失败不影响其余
+                full = dict(candidate)
+            cn = full.get("cn") or candidate.get("cn", "")
+            en = full.get("en") or candidate.get("en", "") or full.get("original", "")
+            original = full.get("original") or candidate.get("original", "")
+            # 打分对所有查询词取最大值：中文译名对不上官方译名时，
+            # 英文原名那一段（长发公主.Tangled）就是命中的那把钥匙
+            score = max(
+                max(_similar(word, cn), _similar(word, en), _similar(word, original))
+                for word in queries
+            )
+            got = str(full.get("year") or candidate.get("year") or "")
+            year_ok = bool(year) and got == year
+            # 年份不匹配要扣分，不能只给匹配的加分：《长发公主》(2010) 的
+            # 标题相似度输《芭比之长发公主》(2002)，靠年份对不上才翻得回来
+            year_penalty = -0.2 if (year and got and not year_ok) else 0.0
+            weighted = score + (0.3 if year_ok else 0.0) + year_penalty
+            if weighted > best_weighted:
+                best, best_score, best_weighted, best_year_ok = full, score, weighted, year_ok
+        return best, best_score, best_year_ok
+
+    @staticmethod
+    def _decide(best: dict | None, score: float, year_ok: bool, year: str) -> str:
+        # 阈值偏严格：错配的片名比空着更麻烦，空着至少一眼能看出来
+        if best is None or score < 0.7:
+            return "无匹配"
+        if score >= 0.9 or (year_ok and score >= 0.85):
+            status = "已匹配"
+        else:
+            status = "需人工确认"
+        # 年份对不上就降级，同名不同片是自动匹配最常见的错误
+        if year and best.get("year") and str(best["year"]) != year:
+            status = "需人工确认"
+        return status
+
     def _identify_one(self, index: int, record: dict, matched: int, pending: int):
         is_tv = record.get("kind") == "tv"
         # 剧集的文件名是「01.flv」「第01话…」，片名要从父目录取
@@ -249,58 +310,49 @@ class IdentifyWorker(QThread):
             self.row_updated.emit(index - 1, {}, "无匹配：文件名里没有片名")
             return matched, pending + 1
 
-        results = self.client.search_tv(query, year) if is_tv else self.client.search(query, year)
-        if not results:
-            self.row_updated.emit(index - 1, {"query": query}, "无匹配")
-            return matched, pending + 1
+        def search_one(word: str) -> list[dict]:
+            return self.client.search_tv(word, year) if is_tv else self.client.search(word, year)
 
-        # 候选窗口用 TMDB 的原始顺序，不要按相似度重排后再截断。
-        # 查询词是英文（Dan Da Dan）而 TMDB 返回中文名时，相关片的
-        # 标题相似度是 0，会被自己的排序挤出窗口，最后匹配到一部无关片。
-        # 相似度只用来在候选里挑最好的那个。
-        top_score = max(_similar(query, item.get("cn", "")) for item in results[:1])
-        ranked = results[:1] if top_score >= 0.92 else results[:3]
+        # 备用查询词：①「真人版」这类 TMDB 标题里没有的后缀先剥掉；
+        # ②文件名里的英文/日文原名段（长发公主.Tangled → Tangled）。
+        # 主查询词一击命中就不打这些额外请求，省得撞 429。
+        variants: list[str] = []
+        stripped = naming.strip_edition_suffix(query)
+        if stripped and _norm(stripped) != _norm(query):
+            variants.append(stripped)
+        known = {_norm(query)} | {_norm(v) for v in variants}
+        for word in naming.query_variants(record["path"], query):
+            if _norm(word) not in known:
+                known.add(_norm(word))
+                variants.append(word)
 
+        queries = [query]
+        candidates: list[dict] = []
+        results = search_one(query)
+        if results:
+            candidates = self._window(query, results)
         best: dict | None = None
-        best_score = 0.0
-        best_weighted = -1.0
-        best_year_ok = False
-        for candidate in ranked:
-            try:
-                if is_tv:
-                    full = self.client.tv_details(candidate["id"])
-                else:
-                    full = self.client.details(candidate["id"])
-            except Exception:  # noqa: BLE001 - 单个候选失败不影响其余
-                full = dict(candidate)
-            cn = full.get("cn") or candidate.get("cn", "")
-            en = full.get("en") or candidate.get("en", "") or full.get("original", "")
-            score = max(_similar(query, cn), _similar(query, en))
-            got = str(full.get("year") or candidate.get("year") or "")
-            year_ok = bool(year) and got == year
-            # 年份不匹配要扣分，不能只给匹配的加分：《长发公主》(2010) 的
-            # 标题相似度输《芭比之长发公主》(2002)，靠年份对不上才翻得回来
-            year_penalty = -0.2 if (year and got and not year_ok) else 0.0
-            weighted = score + (0.3 if year_ok else 0.0) + year_penalty
-            if weighted > best_weighted:
-                best, best_score, best_weighted, best_year_ok = full, score, weighted, year_ok
+        score, year_ok = 0.0, False
+        if candidates:
+            best, score, year_ok = self._pick(candidates, queries, year, is_tv)
+        status = self._decide(best, score, year_ok, year)
 
-        if best is None:
+        if status != "已匹配":
+            for word in variants:
+                found = search_one(word)
+                if not found:
+                    continue
+                queries.append(word)
+                seen = {item.get("id") for item in candidates}
+                candidates += [it for it in self._window(word, found) if it.get("id") not in seen]
+                best, score, year_ok = self._pick(candidates, queries, year, is_tv)
+                status = self._decide(best, score, year_ok, year)
+                if status == "已匹配":
+                    break
+
+        if best is None or status == "无匹配":
             self.row_updated.emit(index - 1, {"query": query}, "无匹配")
             return matched, pending + 1
-
-        # 阈值偏严格：错配的片名比空着更麻烦，空着至少一眼能看出来
-        if best_score >= 0.9 or (best_year_ok and best_score >= 0.85):
-            status = "已匹配"
-        elif best_score >= 0.7:
-            status = "需人工确认"
-        else:
-            self.row_updated.emit(index - 1, {"query": query}, "无匹配")
-            return matched, pending + 1
-
-        # 年份对不上就降级，同名不同片是自动匹配最常见的错误
-        if year and best.get("year") and str(best["year"]) != year:
-            status = "需人工确认"
         if not best.get("overview") and hasattr(self.client, "enrich"):
             try:
                 best = self.client.enrich(best)
