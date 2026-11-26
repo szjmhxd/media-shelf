@@ -668,5 +668,100 @@ class TvNamingFixTest(unittest.TestCase):
         )
 
 
+class VarietyTest(unittest.TestCase):
+    """综艺：第N期上/下、加更、先导篇、播出日期（v0.3.0）。"""
+
+    def test_parse_variety_episode(self) -> None:
+        r = naming.parse_variety("2026-07-25 第5期上.mkv")
+        self.assertEqual((r["qi"], r["part"], r["air_date"]), (5, "上", "2026-07-25"))
+        self.assertFalse(r["special"])
+
+    def test_parse_variety_date_dot_format(self) -> None:
+        r = naming.parse_variety("2026.08.02-第6期下-4K.高码率.mp4")
+        self.assertEqual((r["qi"], r["part"], r["air_date"]), (6, "下", "2026-08-02"))
+
+    def test_parse_variety_bonus_is_special(self) -> None:
+        r = naming.parse_variety("2023-08-16 第1期加更：云南神秘食物.mkv")
+        self.assertTrue(r["special"])
+        self.assertEqual(r["qi"], 1)
+
+    def test_parse_variety_pilot_is_special(self) -> None:
+        r = naming.parse_variety("2023-07-30 森林体验篇：沈腾携显眼包朋友.mkv")
+        self.assertTrue(r["special"])
+        self.assertEqual(r["qi"], 0)
+        self.assertEqual(r["air_date"], "2023-07-30")
+
+    def test_normal_episode_not_variety(self) -> None:
+        self.assertEqual(naming.parse_variety("S01E05.mkv")["qi"], 0)
+        self.assertEqual(naming.parse_variety("01.第一回 郭女侠怒砸同福店.mkv")["qi"], 0)
+
+    def test_expected_episode_math(self) -> None:
+        # 一期拆两集：上=N*2-1 下=N*2
+        self.assertEqual(naming.variety_expected_episode(5, "上"), 9)
+        self.assertEqual(naming.variety_expected_episode(5, "下"), 10)
+        self.assertEqual(naming.variety_expected_episode(1, ""), 1)
+
+    def test_special_renders_season_00(self) -> None:
+        record = {
+            "path": "N:/x/2023-08-16 第1期加更：云南.mkv",
+            "kind": "special",
+            "season": 0,
+            "episode": 3,
+            "ep_title": "第1期加更：云南神秘食物",
+            "meta": {"cn": "现在就出发"},
+        }
+        name = naming.render_filename(record, "{cn}.S{season}E{episode}.{ep_title}")
+        self.assertEqual(name, "现在就出发.S00E03.第1期加更：云南神秘食物.mkv")
+
+    def test_special_plan_goes_to_season_00(self) -> None:
+        from mediashelf import organizer
+        from mediashelf.probe import ProbeResult
+
+        probe = ProbeResult(path="x.mkv", size=1)
+        records = [
+            {
+                "path": "N:/x/2023-08-30 第3期加更：吃播.mkv",
+                "name": "2023-08-30 第3期加更：吃播.mkv",
+                "kind": "special",
+                "season": 0,
+                "episode": 0,
+                "checked": True,
+                "meta": {"cn": "现在就出发", "year": "2023", "tmdbid": 1},
+                "probe": probe,
+                "source": "",
+                "group": "",
+                "edition": "",
+            },
+            {
+                "path": "N:/x/2023-08-16 第1期加更：云南.mkv",
+                "name": "2023-08-16 第1期加更：云南.mkv",
+                "kind": "special",
+                "season": 0,
+                "episode": 0,
+                "checked": True,
+                "meta": {"cn": "现在就出发", "year": "2023", "tmdbid": 1},
+                "probe": probe,
+                "source": "",
+                "group": "",
+                "edition": "",
+            },
+        ]
+        ops = organizer.build_plan(
+            records,
+            Path("N:/x"),
+            template="{cn}.{year}",
+            folder_template="{cn} ({year})",
+            organize=True,
+            write_nfo=True,
+            download_images=False,
+            ep_template="{cn}.S{season}E{episode}",
+        )
+        moves = [op for op in ops if op.kind == "move" and op.dst]
+        # 按播出日期排序：8-16 的编 E01，8-30 的编 E02
+        dsts = sorted(Path(op.dst).as_posix() for op in moves)
+        self.assertTrue(any("Season 00/" in d and ".S00E01." in d for d in dsts), dsts)
+        self.assertTrue(any("Season 00/" in d and ".S00E02." in d for d in dsts), dsts)
+
+
 if __name__ == "__main__":
     unittest.main()

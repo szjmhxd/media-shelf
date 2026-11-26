@@ -187,9 +187,14 @@ def _do_nfo(op: Op) -> str:
     path = Path(op.dst)
     kind = op.payload.get("kind") or "movie"
 
-    if kind == "tv_episode":
+    if kind in ("tv_episode", "tv_special"):
+        ep_meta = meta
+        if kind == "tv_special":
+            # 加更/花絮在 TMDB 没有集条目，meta 里的 tmdbid 是剧的，
+            # 写进单集 nfo 会让刮削器错链到正片，去掉
+            ep_meta = {k: v for k, v in meta.items() if k not in ("tmdbid", "overview", "rating")}
         content = nfo_mod.build_episode_nfo(
-            meta,
+            ep_meta,
             int(op.payload.get("season") or 1),
             int(op.payload.get("episode") or 0),
             op.payload.get("ep_title") or "",

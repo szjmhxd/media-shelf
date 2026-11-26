@@ -190,8 +190,17 @@ def build_fields(record: dict) -> dict[str, str]:
         "group": record.get("group") or "",
         "edition": record.get("edition") or "",
         "collection": (meta.get("collection") or "").strip(),
-        "season": str(record.get("season") or "").zfill(2) if record.get("season") else "",
-        "episode": str(record.get("episode") or "").zfill(2) if record.get("episode") else "",
+        # special 的 season 是 0（Season 00/Specials），不能当 falsy 丢掉
+        "season": (
+            "00"
+            if record.get("kind") == "special"
+            else (str(record.get("season") or "").zfill(2) if record.get("season") else "")
+        ),
+        "episode": (
+            str(record.get("episode") or 0).zfill(2)
+            if record.get("kind") == "special" or record.get("episode")
+            else ""
+        ),
         "ep_title": (meta.get("ep_title") or record.get("ep_title") or "").strip(),
     }
     return fields
@@ -516,6 +525,10 @@ _EP_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bEP\.?\s*(\d{1,3})\b"), "tag"),
     # 第01话 / 第 2 集 / 第3話
     (re.compile(r"第\s*(\d{1,3})\s*[集话話]"), "cn"),
+    # 第5期上 / 第5期 —— 综艺的「期」。上下折算成集号粗值（上=N*2-1 下=N*2），
+    # 真集号由综艺匹配引擎对 TMDB 集表修正；这里只为凑够 classify 的集号判定，
+    # 否则「第N期」文件全解不出集号、整目录会被误判成电影（同 EP04 的老坑）
+    (re.compile(r"第\s*(\d{1,3})\s*期\s*(上|下)?"), "variety"),
     # [E01] / 【Ep02】
     (re.compile(r"[\[【(（]\s*[Ee][Pp]?(\d{1,3})\s*[\]】)）]"), "tag"),
     # [01] / 【12】 —— 方括号里两位数，最常见的字幕组格式
@@ -557,6 +570,89 @@ _SEASON_PATTERNS: list[re.Pattern] = [
 ]
 
 
+# ---- 综艺（variety） ----
+# 「第N期上/下」「第N期」「第N期」——综艺的集号是「期」，一期拆上下两集
+_VARIETY_QI = re.compile(r"第\s*(\d+)\s*期\s*(上|下)?")
+# 播出日期：2026-07-25 / 2026.08.02 / 20260725（文件名前缀最常见）
+_AIR_DATE = re.compile(r"(20\d{2})[.\-_/](\d{2})[.\-_/](\d{2})")
+# TMDB 不收录的非正片：加更/花絮/抢先看/先导……
+_SPECIAL_TOKENS = (
+    "加更",
+    "花絮",
+    "抢先看",
+    "抢先",
+    "先行",
+    "超前",
+    "会员",
+    "彩蛋",
+    "未播",
+    "纯享",
+    "预告",
+    "看点",
+    "幕后",
+    "番外",
+    "片花",
+    "体验篇",
+    "尝鲜篇",
+    "VLOG",
+    "vlog",
+    "直播回放",
+)
+
+
+def parse_air_date(name: str) -> str:
+    """从文件名里提取播出日期，返回 'YYYY-MM-DD'；没有返回空。"""
+    m = _AIR_DATE.search(name or "")
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else ""
+
+
+def parse_variety(name: str) -> dict:
+    """综艺文件名解析。
+
+    「2026-07-25 第5期上.mkv」→ qi=5 part=上 air_date=2026-07-25
+    「2023-08-16 第1期加更：云南神秘食物.mkv」→ qi=1 special=True
+    「2023-07-30 森林体验篇：…mkv」→ special=True（无期数的「篇」类）
+    """
+    text = name or ""
+    stem = Path(text).stem
+    qi, part = 0, ""
+    m = _VARIETY_QI.search(stem)
+    if m:
+        qi, part = int(m.group(1)), m.group(2) or ""
+    special = any(tok in text for tok in _SPECIAL_TOKENS)
+    # 无期数的「XX篇」是先导/特别篇（森林体验篇、尝鲜篇）；
+    # 正片标题带「篇」时有期数兜着，不会误判
+    if not qi and re.search(r"[\u4e00-\u9fff]{2,4}篇", stem):
+        special = True
+    air_date = parse_air_date(stem)
+    # 标题：去掉日期、期数、技术词后的剩余文字
+    # 方括号整段是来源/体积标记（[322458_suhd_25fps_tv_3.73GB]），先删
+    title = re.sub(r"[\[【][^\]】]*[\]】]", " ", stem)
+    title = _AIR_DATE.sub(" ", title)
+    title = _VARIETY_QI.sub(" ", title)
+    title = re.sub(r"[()（）]", " ", title)
+    title = re.sub(
+        r"\d{3,4}[pPkK]\b|[248]K\b|x26[45]|10bit|WEB-?DL|BluRay|HDTV|HEVC|AAC"
+        r"|DDP?\d*(?:\.\d)?|H\.?26[45]|高码率",
+        " ",
+        title,
+        flags=re.I,
+    )
+    title = re.sub(r"[_\-.]+", " ", title).strip(" 　-:：|")
+    return {"qi": qi, "part": part, "special": special, "title": title, "air_date": air_date}
+
+
+def variety_expected_episode(qi: int, part: str) -> int:
+    """「第N期上/下」→ TMDB 预期集号（一期拆两集：上=N*2-1 下=N*2）。
+
+    只是预期值，TMDB 布局偶尔有例外（加更占位），最终以匹配结果为准。
+    """
+    if not qi:
+        return 0
+    base = (qi - 1) * 2
+    return base + (2 if part == "下" else 1)
+
+
 def parse_episode(name: str) -> tuple[int, int] | None:
     """从文件名里解出 (季, 集)。解不出返回 None。
 
@@ -571,6 +667,10 @@ def parse_episode(name: str) -> tuple[int, int] | None:
         for match in pattern.finditer(subject):
             if kind == "sxxexx":
                 season, episode = int(match.group(1)), int(match.group(2))
+            elif kind == "variety":
+                qi = int(match.group(1))
+                part = match.group(2) or ""
+                season, episode = 0, (qi - 1) * 2 + (2 if part == "下" else 1)
             else:
                 episode = int(match.group(1))
                 season = 0  # 稍后由父目录补

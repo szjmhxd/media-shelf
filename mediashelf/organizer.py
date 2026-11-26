@@ -119,6 +119,7 @@ def build_plan(
     write_nfo: bool = True,
     download_images: bool = True,
     ep_template: str = "",
+    special_template: str = "",
 ) -> list[Op]:
     """按记录生成计划。
 
@@ -127,6 +128,18 @@ def build_plan(
     """
     ops: list[Op] = []
     taken: dict[str, str] = {}
+    # 综艺的加更/花絮/先导篇没有 TMDB 集条目，统一归 Season 00（Specials），
+    # 按播出日期排序编 S00E01..n，保证每次运行编号稳定
+    specials = [r for r in records if r.get("checked", True) and r.get("kind") == "special"]
+    specials.sort(key=lambda r: (naming.parse_air_date(r.get("name") or r["path"]), r["path"]))
+    for idx, rec in enumerate(specials, 1):
+        rec["season"] = 0
+        rec["episode"] = idx
+        rec["ep_title"] = (
+            rec.get("ep_title")
+            or naming.parse_variety(rec.get("name") or rec["path"]).get("title")
+            or ""
+        )
     # collection_id / 归一化名 → 目录名。同一系列只允许一个目录。
     collection_dirs: dict[str, str] = {}
     # 剧集的 tvshow.nfo 和海报按剧去重，同一部剧只写一次
@@ -139,10 +152,14 @@ def build_plan(
         has_meta = bool(meta.get("cn") or meta.get("en"))
 
         video = Path(record["path"])
-        is_tv = record.get("kind") == "tv"
+        is_tv = record.get("kind") in ("tv", "special")
+        is_special = record.get("kind") == "special"
 
-        # 剧集用 SxxExx 模板，电影用普通模板
-        active_template = ep_template if (is_tv and ep_template) else template
+        # 剧集用 SxxExx 模板，综艺特别篇用带标题的 S00E 模板，电影用普通模板
+        if is_special:
+            active_template = special_template or "{cn}.S{season}E{episode}.{ep_title}"
+        else:
+            active_template = ep_template if (is_tv and ep_template) else template
         filename = naming.render_filename(record, active_template)
         if not filename:
             continue
@@ -151,7 +168,8 @@ def build_plan(
             folder_name = naming.render_folder(record, folder_template)
             if is_tv:
                 # 剧集标准结构：剧名 (年)/Season 01/剧名 - S01E01.mkv
-                season_no = int(record.get("season") or 1)
+                # special 的 season 是 0（Season 00/Specials），不能被 or 1 吃掉
+                season_no = 0 if is_special else int(record.get("season") or 1)
                 target_dir = root / folder_name / f"Season {season_no:02d}"
             else:
                 target_dir = root / folder_name
@@ -209,7 +227,7 @@ def build_plan(
                         f"{meta.get('cn')} S{season_no:02d}E{episode_no:02d}",
                         {
                             "meta": meta,
-                            "kind": "tv_episode",
+                            "kind": "tv_special" if is_special else "tv_episode",
                             "season": season_no,
                             "episode": episode_no,
                             "ep_title": record.get("ep_title") or meta.get("ep_title") or "",

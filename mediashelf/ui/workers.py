@@ -304,8 +304,83 @@ class IdentifyWorker(QThread):
             status = "需人工确认"
         return status
 
+    def _match_variety_episode(
+        self, show_id, season_hint, variety: dict
+    ) -> tuple[int, int, str] | None:
+        """综艺正片在 TMDB 集表里定位这一集 → (season, episode, ep_title)。
+
+        三级定位：播出日期精确 → 「第N期上/下」标题 token → 期号数学映射。
+        上/下在 TMDB 里是独立集（第1期上=E01、第1期下=E02），不是一集拆两半，
+        所以本地的「第N期上/下」能直接对上集号。日期最准，做第一优先。
+        """
+        qi, part = variety.get("qi") or 0, variety.get("part") or ""
+        air = variety.get("air_date") or ""
+
+        def season_eps(s: int) -> list[dict]:
+            try:
+                return self.client.season_details(show_id, s)
+            except Exception:  # noqa: BLE001 - 单季拿不到不算整批失败
+                return []
+
+        # 目录里的季号优先（S02/ 锁定第 2 季），再全季兜底
+        seasons: list[int] = []
+        if season_hint:
+            seasons.append(int(season_hint))
+        try:
+            full = self.client.tv_details(show_id)
+            for s in full.get("seasons") or []:
+                n = int(s.get("number") or s.get("season_number") or s.get("season") or 0)
+                if n > 0 and n not in seasons:
+                    seasons.append(n)
+        except Exception:  # noqa: BLE001
+            pass
+
+        token = f"第{qi}期{part}" if qi else ""
+        expected = naming.variety_expected_episode(qi, part) if qi else 0
+        loose: list[tuple[int, dict]] = []
+
+        for s in seasons:
+            eps = season_eps(s)
+            if not eps:
+                continue
+            # ① 播出日期精确命中
+            if air:
+                hits = [e for e in eps if (e.get("air_date") or "") == air]
+                if len(hits) == 1:
+                    e = hits[0]
+                    return s, int(e["number"]), e.get("title") or ""
+                if len(hits) > 1 and part:
+                    for e in hits:
+                        if part in (e.get("title") or ""):
+                            return s, int(e["number"]), e.get("title") or ""
+                loose += [(s, e) for e in hits]
+            # ② 「第N期上/下」token 在集标题里唯一
+            if token:
+                hits = [e for e in eps if token in (e.get("title") or "")]
+                if len(hits) == 1:
+                    e = hits[0]
+                    return s, int(e["number"]), e.get("title") or ""
+            # ③ 期号数学映射（上=N*2-1 下=N*2）验证该集存在
+            if expected:
+                for e in eps:
+                    if int(e.get("number") or 0) == expected:
+                        loose.append((s, e))
+                        break
+
+        if len(loose) == 1:
+            s, e = loose[0]
+            return s, int(e["number"]), e.get("title") or ""
+        if len(loose) > 1 and part:
+            for s, e in loose:
+                if part in (e.get("title") or ""):
+                    return s, int(e["number"]), e.get("title") or ""
+        return None
+
     def _identify_one(self, index: int, record: dict, matched: int, pending: int):
-        is_tv = record.get("kind") == "tv"
+        is_tv = record.get("kind") in ("tv", "special", "variety")
+        # 综艺形态：「第N期上/下」「第N期加更」+ 播出日期。普通剧集不会叫「第N期」，
+        # parse_variety 对 SxxExx / 「01.第一回」返回 qi=0，不会误触发
+        variety = naming.parse_variety(record.get("name") or record["path"]) if is_tv else {}
         # 剧集的文件名是「01.flv」「第01话…」，片名要从父目录取
         if is_tv:
             query, year = naming.guess_series_query(record["path"])
@@ -366,6 +441,23 @@ class IdentifyWorker(QThread):
                 best = self.client.enrich(best)
             except Exception:  # noqa: BLE001 - 简介拿不到不影响改名
                 pass
+
+        # 综艺：加更/花絮/先导篇 TMDB 不收录集条目，归 Specials（Season 00）；
+        # 正片用播出日期/期号在集表里定位。上下是独立集，数学映射上=N*2-1 下=N*2
+        if is_tv and variety.get("special"):
+            record["kind"] = "special"
+            record["season"] = 0
+            record["episode"] = 0  # organizer 按播出日期统一编 S00E
+            record["ep_title"] = variety.get("title") or ""
+        elif is_tv and variety.get("qi"):
+            hit = self._match_variety_episode(best.get("id"), record.get("season"), variety)
+            if hit:
+                record["season"], record["episode"] = hit[0], hit[1]
+                best = dict(best)
+                best["ep_title"] = hit[2]
+            else:
+                # 集表里定位不到（TMDB 缺集/期号异常），不动集号，交人工
+                status = "需人工确认"
 
         # 剧集补集标题。同一季的 season_details 有磁盘缓存，12 集只打一次请求
         if is_tv and record.get("season") and record.get("episode"):

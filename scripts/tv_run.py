@@ -28,8 +28,10 @@ from mediashelf.probe import AudioTrack, ProbeResult, probe  # noqa: E402
 from mediashelf.tmdb import TMDBClient  # noqa: E402
 from mediashelf.ui.workers import IdentifyWorker, classify_media  # noqa: E402
 
-ROOT = Path("N:/电视剧")
-SNAPSHOT = Path(__file__).resolve().parent / ".tv_records.json"
+ROOT = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("N:/电视剧")
+SNAPSHOT = Path(__file__).resolve().parent / (
+    ".tv_records.json" if len(sys.argv) <= 2 else f".tv_records_{sys.argv[2].replace(chr(92), '/').rstrip('/').split('/')[-1]}.json"
+)
 
 
 def _record_from(video: Path, info: dict, ffprobe: str) -> dict:
@@ -239,4 +241,4 @@ if __name__ == "__main__":
     elif mode == "apply":
         apply_records()
     else:
-        raise SystemExit("用法: tv_run.py identify|apply")
+        raise SystemExit("用法: tv_run.py identify|apply [库目录]")

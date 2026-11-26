@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "MediaShelf"
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.3.0"
 
 # 第二段用 {orig}：日本片出日文原名，英语片出英文名，中文片退化成英文名，
 # 由 naming.language_original() 按 TMDB 的 original_language 决定。
@@ -19,6 +19,7 @@ DEFAULT_FOLDER_TEMPLATE = "{cn} ({year})"
 
 # 剧集走 TVDB/Jellyfin 惯例的 SxxExx，文件放 Season 子目录
 DEFAULT_EP_TEMPLATE = "{cn}.{orig}.S{season}E{episode}.{res}.{codec}"
+DEFAULT_SPECIAL_TEMPLATE = "{cn}.S{season}E{episode}.{ep_title}"
 DEFAULT_EP_FOLDER_TEMPLATE = "{cn} ({year})/Season {season}"
 
 PRESETS: list[tuple[str, str, str]] = [
