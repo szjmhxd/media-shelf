@@ -45,9 +45,9 @@ from .workers import (
     ScanWorker,
 )
 
-COLUMNS = ["", "文件", "大小", "中文名", "英文名", "年份", "片源", "发布组", "新文件名", "状态"]
-COL_CHECK, COL_FILE, COL_SIZE, COL_CN, COL_EN, COL_YEAR, COL_SRC, COL_GROUP, COL_NEW, COL_STATUS = (
-    range(10)
+COLUMNS = ["", "文件", "大小", "中文名", "英文名", "年份", "片源", "发布组", "新文件名", "状态", "类型"]
+COL_CHECK, COL_FILE, COL_SIZE, COL_CN, COL_EN, COL_YEAR, COL_SRC, COL_GROUP, COL_NEW, COL_STATUS, COL_TYPE = (
+    range(11)
 )
 
 EDIT_FIELDS = {
@@ -176,6 +176,7 @@ class MainWindow(QMainWindow):
             header.setSectionResizeMode(col, QHeaderView.Stretch)
         self.table.setMinimumWidth(720)
         header.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(COL_TYPE, QHeaderView.ResizeToContents)
         self.table.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.table, 1)
 
@@ -418,6 +419,10 @@ class MainWindow(QMainWindow):
         if color:
             status.setForeground(QColor(color))
         self.table.setItem(row, COL_STATUS, status)
+        kind_label = {"tv": "剧集", "special": "特别篇"}.get(record.get("kind"), "电影")
+        kind_item = QTableWidgetItem(kind_label)
+        kind_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        self.table.setItem(row, COL_TYPE, kind_item)
         self._loading = False
 
         self.refresh_preview(row)
@@ -431,6 +436,9 @@ class MainWindow(QMainWindow):
         self.table.item(index, COL_SIZE).setText(_human_size(record.get("size", 0)))
         self.table.item(index, COL_SRC).setText(record.get("source", ""))
         self.table.item(index, COL_GROUP).setText(record.get("group", ""))
+        self.table.item(index, COL_TYPE).setText(
+            {"tv": "剧集", "special": "特别篇"}.get(record.get("kind"), "电影")
+        )
         status_item = self.table.item(index, COL_STATUS)
         status_item.setText(record.get("status", "待识别"))
         color = STATUS_COLORS.get(record.get("status", ""))
