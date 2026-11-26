@@ -286,7 +286,9 @@ class IdentifyWorker(QThread):
         return best, best_score, best_year_ok
 
     @staticmethod
-    def _decide(best: dict | None, score: float, year_ok: bool, year: str) -> str:
+    def _decide(
+        best: dict | None, score: float, year_ok: bool, year: str, is_tv: bool = False
+    ) -> str:
         # 阈值偏严格：错配的片名比空着更麻烦，空着至少一眼能看出来
         if best is None or score < 0.7:
             return "无匹配"
@@ -294,8 +296,11 @@ class IdentifyWorker(QThread):
             status = "已匹配"
         else:
             status = "需人工确认"
-        # 年份对不上就降级，同名不同片是自动匹配最常见的错误
-        if year and best.get("year") and str(best["year"]) != year:
+        # 年份对不上就降级，同名不同片是自动匹配最常见的错误。
+        # 剧集例外：季的播出年 ≠ 条目首播年是常态（家有儿女条目 2005、S03 是
+        # 2007 播出；爱情公寓条目 2009、S05 是 2020 播出），拿目录年份卡条目
+        # 年份会把正确的匹配全部降级掉。剧集的同名风险靠相似度阈值兜着。
+        if not is_tv and year and best.get("year") and str(best["year"]) != year:
             status = "需人工确认"
         return status
 
@@ -311,7 +316,10 @@ class IdentifyWorker(QThread):
             return matched, pending + 1
 
         def search_one(word: str) -> list[dict]:
-            return self.client.search_tv(word, year) if is_tv else self.client.search(word, year)
+            # TV 搜索不带年份硬过滤：季的播出年和条目首播年不同是常态，
+            # 带 first_air_date_year 会把正主直接过滤掉（搜《爱情公寓》+2014
+            # 只返回《球爱酒吧》，正主 2009 首播被滤掉）。年份在打分里仍然参与。
+            return self.client.search_tv(word) if is_tv else self.client.search(word, year)
 
         # 备用查询词：①「真人版」这类 TMDB 标题里没有的后缀先剥掉；
         # ②文件名里的英文/日文原名段（长发公主.Tangled → Tangled）。
@@ -335,7 +343,7 @@ class IdentifyWorker(QThread):
         score, year_ok = 0.0, False
         if candidates:
             best, score, year_ok = self._pick(candidates, queries, year, is_tv)
-        status = self._decide(best, score, year_ok, year)
+        status = self._decide(best, score, year_ok, year, is_tv)
 
         if status != "已匹配":
             for word in variants:
@@ -346,7 +354,7 @@ class IdentifyWorker(QThread):
                 seen = {item.get("id") for item in candidates}
                 candidates += [it for it in self._window(word, found) if it.get("id") not in seen]
                 best, score, year_ok = self._pick(candidates, queries, year, is_tv)
-                status = self._decide(best, score, year_ok, year)
+                status = self._decide(best, score, year_ok, year, is_tv)
                 if status == "已匹配":
                     break
 

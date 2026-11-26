@@ -597,6 +597,22 @@ class MatchQueryTest(unittest.TestCase):
         path = "N:/x/KIDS/KIDS - 01.mkv"
         self.assertEqual(naming.guess_series_query(path), ("KIDS", ""))
 
+    def test_bracket_only_folder_yields_title(self) -> None:
+        # [人民公仆][全1-3季][英语中字][1080P蓝光][42G]：剥掉方括号后没词可搜，
+        # 得回头从括号内容里挑剧名
+        path = "N:/电视剧/[人民公仆][全1-3季][英语中字][1080P蓝光][42G]/Season 1/01.mkv"
+        self.assertEqual(naming.guess_series_query(path), ("人民公仆", ""))
+
+    def test_bracket_query_skips_noise_segments(self) -> None:
+        # 字幕组方括号是噪音，不能当剧名
+        self.assertEqual(naming._bracket_query("[DBD-Raws][Grand Blue][01][1080P]"), "")
+        self.assertEqual(naming._bracket_query("[人民公仆][全1-3季][英语中字][42G]"), "人民公仆")
+
+    def test_short_name_dir_is_skipped(self) -> None:
+        # 「_DT5RR~R」是 Windows 8.3 短名残留，跳过它回溯到上层取剧名
+        path = "N:/x/家有儿女（2005）S01-S04部合集 1080P 国语中字 总367集/_DT5RR~R/001.mp4"
+        self.assertEqual(naming.guess_series_query(path), ("家有儿女", "2005"))
+
     def test_strip_edition_suffix(self) -> None:
         self.assertEqual(naming.strip_edition_suffix("碧蓝之海真人版"), "碧蓝之海")
         self.assertEqual(naming.strip_edition_suffix("Grand Blue Live Action"), "Grand Blue")
@@ -613,6 +629,43 @@ class MatchQueryTest(unittest.TestCase):
         record = {"path": "N:/x/碧蓝之海真人版.mkv", "meta": {}}
         name = naming.render_filename(record, "{cn} ({year}).{source}")
         self.assertEqual(name, "碧蓝之海真人版.mkv")
+
+
+class TvNamingFixTest(unittest.TestCase):
+    """电视剧库实测暴露的解析坑（v0.2.2）。"""
+
+    def test_ep_prefix_episode(self) -> None:
+        # 老九门.EP04.2016… 解析不出集号时整目录会被误判成电影，
+        # 其中几集甚至错配到法国纪录片（文件名里同样带 EP01）
+        self.assertEqual(
+            naming.parse_episode("老九门.EP04.2016.HD1080P.X264.AAC.Mandarin.CHS.Mp4Ba.mkv"),
+            (0, 4),
+        )
+        self.assertEqual(naming.parse_episode("EP04.mkv"), (0, 4))
+        self.assertEqual(naming.parse_episode("老九门.EP28.2016.mkv"), (0, 28))
+
+    def test_w_guojv_prefix_stripped(self) -> None:
+        q, y = naming.guess_series_query(
+            "N:/x/W 国剧 武林外传 (2006) 2K 修复【vx公众号：下班时请叫醒我】/01.第一回 郭女侠怒砸同福店.mp4"
+        )
+        self.assertEqual(q, "武林外传")
+        self.assertEqual(y, "2006")
+
+    def test_2k_tail_noise_stripped(self) -> None:
+        q, y = naming.guess_series_query("N:/x/武林外传 (2006) 2K 修复/01.mp4")
+        self.assertEqual(q, "武林外传")
+        self.assertEqual(y, "2006")
+
+    def test_tv_year_mismatch_not_downgraded(self) -> None:
+        # 剧集的季播出年 ≠ 条目首播年是常态，不能降级
+        from mediashelf.ui.workers import IdentifyWorker
+
+        best = {"cn": "家有儿女", "year": "2005"}
+        self.assertEqual(IdentifyWorker._decide(best, 0.95, False, "2007", is_tv=True), "已匹配")
+        # 电影仍然降级（同名不同片最常见的错误）
+        self.assertEqual(
+            IdentifyWorker._decide(best, 0.95, False, "2007", is_tv=False), "需人工确认"
+        )
 
 
 if __name__ == "__main__":

@@ -248,6 +248,20 @@ GENERIC_DIRS = {
     "合集",
     "媒体",
     "媒体库",
+    "电视剧",
+    "剧集",
+    "电视",
+    "tv",
+    "tvs",
+    "series",
+    "show",
+    "shows",
+    "anime",
+    "动画",
+    "动漫",
+    "番剧",
+    "综艺",
+    "纪录片",
     "movie",
     "movies",
     "film",
@@ -283,11 +297,19 @@ def guess_query(path: str | Path) -> tuple[str, str]:
     return _parse_title(path.stem)
 
 
-# 剧集目录里常见的「容器名」，不是片名
+# 剧集目录里常见的「容器名」，不是片名。从匹配点吃到末尾。
+# 「2K 修复」「蓝光修复」这类尾巴也要剥，否则查询词变成「武林外传 2K 修复」搜不出正主。
 _SERIES_NOISE = re.compile(
     r"(日语|简中|简日|双语|国语|粤语|特效字幕|B站|字幕|内封|外挂"
-    r"|4K|1080P|2160P|1080p|2160p|HDR|SDR|DV|杜比|高码|抢先|版)"
+    r"|4K|2K|1080P|2160P|1080p|2160p|HDR|SDR|DV|杜比|高码|抢先|修复|蓝光|版)"
     r".*$"
+)
+# 方括号内容里的噪音段：[人民公仆][全1-3季][英语中字][1080P蓝光][42G] 这种
+# 整段信息都包在括号里的命名，剥光后没词可搜，得回头从括号里挑剧名。
+_NOISE_BRACKET = re.compile(
+    r"(字幕|中字|国语|英语|日语|韩语|粤语|双语"
+    r"|全\s*\d|共\s*\d|第.+[季部话話集]"
+    r"|\d+\s*[PG]\b|\d+[PpKk]\b|蓝光|高清|修复|收藏版|合集|\d+\s*[Gg]\b)"
 )
 # 「第二季」「S2」「Season 01」都是容器名尾巴，不是剧名。
 # （只认 S+数字、不认裸 S 结尾，否则「KIDS」会被啃掉尾巴。）
@@ -296,6 +318,24 @@ _SEASON_TAIL = re.compile(
 )
 # 「Dan Da Dan - 01-12」「Dan Da Dan S2 - 01」这类尾巴是集号范围，不是剧名
 _EP_RANGE = re.compile(r"[\s._-]*[Ss]?\d{1,3}\s*-\s*\d{1,3}\s*$|[\s._-]+\d{1,3}\s*$")
+
+
+def _bracket_query(raw: str) -> str:
+    """从方括号内容里挑剧名。
+
+    常规命名里方括号是字幕组噪音（[DBD-Raws]、[IQIYI WebRip]），剥掉就行；
+    但 [人民公仆][全1-3季][英语中字][1080P蓝光][42G] 这种整段信息都包在括号里，
+    剥光后没词可搜。只在剥光后没词时才走这里，取第一个像剧名的中文段。
+    """
+    for seg in re.findall(r"[\[【]([^\]】]+)[\]】]", raw):
+        seg = seg.strip(" .-_·:：")
+        if not seg or not re.search(r"[一-鿿]", seg):
+            continue
+        if _NOISE_BRACKET.search(seg):
+            continue
+        if len(seg) >= 2:
+            return seg
+    return ""
 
 
 def guess_series_query(path: str | Path) -> tuple[str, str]:
@@ -309,7 +349,8 @@ def guess_series_query(path: str | Path) -> tuple[str, str]:
     path = Path(path)
     for parent in (path.parent, path.parent.parent, path.parent.parent.parent):
         raw = parent.name
-        if not raw or raw.strip().lower() in GENERIC_DIRS:
+        # 「_DT5RR~R」这类 Windows 8.3 短名残留不是剧名，别拿去搜
+        if not raw or raw.strip().lower() in GENERIC_DIRS or "~" in raw:
             continue
         # 顺序要紧：先去站点括号（[Feibanyama]、[IQIYI WebRip …]），
         # 否则「2160p」这类噪音词会从括号内部把后面整段吃掉
@@ -321,6 +362,10 @@ def guess_series_query(path: str | Path) -> tuple[str, str]:
         # 整理过的库目录是「剧名 (年)/Season 01/…」，Season 层是容器不是剧名；
         # 当成查询词去搜会匹配到毫不相干的片（拿「Season」搜出过《寻爱交配季》）。
         if not cleaned or re.fullmatch(r"(?i)seasons?|specials?|extras?", cleaned):
+            bracket = _bracket_query(raw)
+            if bracket:
+                _, year = _parse_title(raw)
+                return bracket, year
             continue
         query, year = _parse_title(cleaned)
         if query and len(query) >= 2:
@@ -333,6 +378,8 @@ def _parse_title(raw: str) -> tuple[str, str]:
     # 站点前缀 [xxx]、【xxx】
     text = re.sub(r"[\[【][^\]】]*[\]】]", " ", text)
     text = re.sub(r"@[\w\u4e00-\u9fff]+", " ", text)
+    # 「W 国剧 武林外传」「国剧 家有儿女」这类发行前缀，不是片名
+    text = re.sub(r"^[\s\-_.]*(?:W\s*国剧|国剧)\s*", "", text)
 
     # 年份要从「末尾括号」或「最后一个独立年份」里取，不能取第一个四位数：
     # 《2012》这种片名本身以年份开头，取第一个会得到空片名。
@@ -464,6 +511,9 @@ _NOISE_NUMBERS = {
 _EP_PATTERNS: list[tuple[re.Pattern, str]] = [
     # S01E02 / S1.E2 / s01e02
     (re.compile(r"[Ss](\d{1,2})\s*[._ -]?\s*[Ee][Pp]?(\d{1,3})"), "sxxexx"),
+    # EP04 / EP 04 / Ep.04 ——「老九门.EP04.2016」这种。EP 是明确的集号标记，
+    # 不会和片名里的 E 开头单词冲突（要求 EP 两字母）
+    (re.compile(r"\bEP\.?\s*(\d{1,3})\b"), "tag"),
     # 第01话 / 第 2 集 / 第3話
     (re.compile(r"第\s*(\d{1,3})\s*[集话話]"), "cn"),
     # [E01] / 【Ep02】

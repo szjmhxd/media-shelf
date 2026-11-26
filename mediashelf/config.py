@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "MediaShelf"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 
 # 第二段用 {orig}：日本片出日文原名，英语片出英文名，中文片退化成英文名，
 # 由 naming.language_original() 按 TMDB 的 original_language 决定。
