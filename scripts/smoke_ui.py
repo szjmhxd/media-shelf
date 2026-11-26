@@ -14,9 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from mediashelf import cleanup  # noqa: E402
 from mediashelf import config as cfg  # noqa: E402
 from mediashelf import tmdb as tmdb_mod  # noqa: E402
-from mediashelf.ui.dialogs import PreviewDialog, _merge_by_owner  # noqa: E402
+from mediashelf.ui.dialogs import PreviewDialog, ShellDialog, _merge_by_owner  # noqa: E402
 from mediashelf.ui.main_window import MainWindow  # noqa: E402
 
 
@@ -109,7 +110,35 @@ def main() -> int:
     width = window.minimumSizeHint().width()
     print("错误信息最长时的窗口最小宽度:", width)
     assert width <= 900, f"长错误把窗口撑到 {width}px"
-    assert "不可用" in window.field_summary.text(), window.field_summary.text()
+    print("凭据徽标:", window.key_badge.text(), "|", window.key_badge.toolTip()[:40])
+    assert "不可用" in window.key_badge.text(), window.key_badge.text()
+
+    # 空目录清理：只删空目录，有视频的目录绝不进候选
+    shells = tmp / "空壳 Collection_空壳待删"
+    shells.mkdir()
+    left = tmp / "有片 (2020)"
+    left.mkdir()
+    (left / "a.mkv").write_bytes(b"x")
+    dirty = tmp / "只剩海报 (2021)"
+    dirty.mkdir()
+    (dirty / "poster.jpg").write_bytes(b"y" * 1024)
+
+    found = cleanup.scan(tmp)
+    names = sorted(c.path.name for c in found)
+    print("空目录候选:", names)
+    assert "空壳 Collection_空壳待删" in names
+    assert "只剩海报 (2021)" in names, "整棵树里没有视频，应算空壳"
+    assert "有片 (2020)" not in names, "有视频的目录不能出现在候选里"
+
+    dialog = ShellDialog(found, tmp)
+    assert dialog.list.count() == len(found)
+    print("清理对话框行数:", dialog.list.count())
+    dialog.deleteLater()
+
+    result = cleanup.remove(found)
+    print("删除结果:", result.ok, [p.name for p in result.removed], "失败", len(result.failed))
+    assert not (shells).exists()
+    assert (left / "a.mkv").exists(), "有视频的目录必须原样保留"
 
     window.close()
     print("界面接线正常")

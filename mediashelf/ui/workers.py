@@ -296,3 +296,38 @@ class ApplyWorker(QThread):
             root=self.root,
         )
         self.done.emit(report)
+
+
+class CleanScanWorker(QThread):
+    """找空目录。NAS 上一个目录一个目录地扫，几秒钟，放后台别卡界面。"""
+
+    scanned = Signal(object)
+
+    def __init__(self, root: Path, workers: int = 8) -> None:
+        super().__init__()
+        self.root = root
+        self.workers = workers
+
+    def run(self) -> None:  # noqa: D102
+        from .. import cleanup
+
+        try:
+            found = cleanup.scan(self.root, concurrency=self.workers)
+        except Exception:  # noqa: BLE001 - 扫不了就当没有，别让线程炸掉界面
+            found = []
+        self.scanned.emit(found)
+
+
+class CleanApplyWorker(QThread):
+    """删空目录。只做文件级删除，不碰有视频的目录。"""
+
+    done = Signal(object)
+
+    def __init__(self, candidates) -> None:
+        super().__init__()
+        self.candidates = candidates
+
+    def run(self) -> None:  # noqa: D102
+        from .. import cleanup
+
+        self.done.emit(cleanup.remove(self.candidates))

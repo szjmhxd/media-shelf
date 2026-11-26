@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -28,7 +29,7 @@ from PySide6.QtWidgets import (
 
 from .. import config as cfg
 from ..organizer import Op
-from ..tmdb import TMDBClient, test_key
+from ..tmdb import TMDBClient
 
 
 class SettingsDialog(QDialog):
@@ -52,10 +53,18 @@ class SettingsDialog(QDialog):
         key_row.addWidget(show)
 
         self.test_btn = QPushButton("测试连接")
+        self.test_btn.setFixedWidth(96)
         self.test_btn.clicked.connect(self._test)
-        self.test_label = QLabel("")
+        self.test_label = QLabel("填入凭据后可测试")
         self.test_label.setWordWrap(True)
         self.test_label.setObjectName("hintLabel")
+        self.test_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        # 改了凭据就把上一次的测试结果作废，避免"显示可用但其实是旧 Key"
+        self.key_edit.textChanged.connect(self._reset_test_state)
+
+        test_row = QHBoxLayout()
+        test_row.addWidget(self.test_btn)
+        test_row.addWidget(self.test_label, 1)
 
         self.ffprobe_edit = QLineEdit(config.get("ffprobe", ""))
         self.ffprobe_edit.setPlaceholderText("留空则自动查找 ffprobe")
@@ -89,7 +98,7 @@ class SettingsDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("TMDB 凭据", key_row)
-        form.addRow("", self.test_label)
+        form.addRow("", test_row)
         form.addRow("ffprobe", probe_row)
         form.addRow("元数据语言", self.lang_combo)
         form.addRow("", self.images_check)
@@ -104,6 +113,8 @@ class SettingsDialog(QDialog):
         tip.setWordWrap(True)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("确定")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
@@ -128,12 +139,41 @@ class SettingsDialog(QDialog):
         else:
             self.test_label.setText("没有找到 ffprobe，请手动指定")
 
+    def _reset_test_state(self) -> None:
+        if getattr(self, "_test_worker", None) is not None and self._test_worker.isRunning():
+            return
+        self.test_label.setText("凭据已修改，点「测试连接」验证")
+        self.test_label.setStyleSheet("")
+
+    def _set_test_state(self, state: str, text: str) -> None:
+        colors = {"ok": "#1a7f37", "fail": "#cf222e", "checking": "#9a6700"}
+        prefix = {"ok": "✓ ", "fail": "✗ ", "checking": ""}.get(state, "")
+        self.test_label.setText(prefix + text)
+        self.test_label.setStyleSheet(f"color: {colors[state]};" if state in colors else "")
+
     def _test(self) -> None:
-        self.test_label.setText("正在连接…")
+        from .workers import KeyCheckWorker
+
+        key = self.key_edit.text().strip()
+        if not key:
+            self._set_test_state("fail", "先粘贴 v3 Key 或 v4 Token")
+            return
         self.test_btn.setEnabled(False)
-        ok, message = test_key(self.key_edit.text().strip())
+        self._set_test_state("checking", "正在连接 TMDB…")
+        # 网络请求放后台，不卡对话框
+        self._test_worker = KeyCheckWorker(key)
+        self._test_worker.checked.connect(self._on_test_done)
+        self._test_worker.start()
+
+    def _on_test_done(self, ok: bool, message: str) -> None:
         self.test_btn.setEnabled(True)
-        self.test_label.setText(("✓ " if ok else "✗ ") + message)
+        self._set_test_state("ok" if ok else "fail", message)
+
+    def closeEvent(self, event) -> None:  # noqa: D102
+        worker = getattr(self, "_test_worker", None)
+        if worker is not None and worker.isRunning():
+            worker.wait(3000)
+        super().closeEvent(event)
 
     def apply_to_config(self) -> None:
         self.config.update(
@@ -183,6 +223,7 @@ class MatchDialog(QDialog):
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("使用选中项")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
 
@@ -374,6 +415,7 @@ class PreviewDialog(QDialog):
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("执行")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
@@ -496,3 +538,104 @@ def _fmt_size(size: int) -> str:
     if size >= 1024**2:
         return f"{size / 1024**2:.0f} MB"
     return f"{size / 1024:.0f} KB"
+
+
+class ShellDialog(QDialog):
+    """清理空目录：列出找到的空壳，勾选后删掉。
+
+    判定规则是"整棵树里没有任何视频文件"。带视频的目录压根不会出现在列表里，
+    所以这里的删除不会碰到正片。
+    """
+
+    def __init__(self, candidates: list, root: Path, auto_note: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self.candidates = candidates
+        self.setWindowTitle("清理空目录")
+        self.resize(820, 520)
+
+        empty_count = sum(1 for c in candidates if not c.files)
+        with_files = len(candidates) - empty_count
+        total_size = sum(c.size for c in candidates)
+
+        title = QLabel(
+            f"找到 {len(candidates)} 个空目录"
+            + (
+                f"，其中 {with_files} 个里面还有残留小文件（共 {_fmt_size(total_size)}）"
+                if with_files
+                else ""
+            )
+        )
+        title.setObjectName("titleLabel")
+        title.setWordWrap(True)
+
+        hint_text = "带视频文件的目录不会被列出。删除在 NAS 上不进回收站，删前请确认。"
+        if auto_note:
+            hint_text = auto_note + "\n" + hint_text
+        hint = QLabel(hint_text)
+        hint.setObjectName("hintLabel")
+        hint.setWordWrap(True)
+
+        self.list = QListWidget()
+        for cand in candidates:
+            try:
+                rel = cand.path.relative_to(root)
+            except ValueError:
+                rel = cand.path
+            item = QListWidgetItem(f"{rel}\n    {cand.describe()}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            item.setToolTip(str(cand.path))
+            self.list.addItem(item)
+
+        all_btn = QPushButton("全选")
+        none_btn = QPushButton("全不选")
+        all_btn.clicked.connect(lambda: self._set_all(Qt.Checked))
+        none_btn.clicked.connect(lambda: self._set_all(Qt.Unchecked))
+
+        cancel_btn = QPushButton("取消")
+        delete_btn = QPushButton(f"删除这 {len(candidates)} 个目录")
+        delete_btn.setObjectName("primaryButton")
+        cancel_btn.clicked.connect(self.reject)
+        delete_btn.clicked.connect(self._confirm)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(all_btn)
+        buttons.addWidget(none_btn)
+        buttons.addStretch(1)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(delete_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(title)
+        layout.addWidget(hint)
+        layout.addWidget(self.list, 1)
+        layout.addLayout(buttons)
+
+    def _set_all(self, state) -> None:
+        for index in range(self.list.count()):
+            self.list.item(index).setCheckState(state)
+
+    def selected(self) -> list:
+        return [
+            cand
+            for index, cand in enumerate(self.candidates)
+            if self.list.item(index).checkState() == Qt.Checked
+        ]
+
+    def _confirm(self) -> None:
+        chosen = self.selected()
+        if not chosen:
+            QMessageBox.information(self, "没有选中", "先勾选要删除的目录。")
+            return
+        size = sum(c.size for c in chosen)
+        detail = f"共 {size / 1024**2:.0f} MB 残留文件" if size else "全部是空目录，不含任何文件"
+        answer = QMessageBox.warning(
+            self,
+            "确认删除",
+            f"将删除 {len(chosen)} 个目录（{detail}）。\n\n"
+            "NAS / 网络盘删除不进回收站，误删无法恢复。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self.accept()

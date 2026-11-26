@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 
 from mediashelf import apply as apply_mod
+from mediashelf import cleanup, naming, nfo, organizer
 from mediashelf import config as cfg
-from mediashelf import naming, nfo, organizer
 from mediashelf.probe import AudioTrack, ProbeResult
 
 
@@ -293,6 +293,80 @@ class PlanTest(unittest.TestCase):
             )
             report = apply_mod.execute(ops, root=self.root)
         self.assertEqual(report.residuals, [])
+
+
+class CleanupTest(unittest.TestCase):
+    """空目录清理：只在确实没有视频时下手。"""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        import shutil
+
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_empty_dir_is_candidate(self) -> None:
+        empty = self.tmp / "空壳 (2019)"
+        empty.mkdir()
+        found = cleanup.scan(self.tmp)
+        self.assertEqual([c.path.name for c in found], ["空壳 (2019)"])
+        self.assertTrue(found[0].removable)
+        self.assertEqual(found[0].file_count, 0)
+
+    def test_dir_with_video_is_never_a_candidate(self) -> None:
+        keeper = self.tmp / "正片 (2020)"
+        keeper.mkdir()
+        (keeper / "movie.mkv").write_bytes(b"x")
+        found = cleanup.scan(self.tmp)
+        self.assertEqual(found, [])
+
+    def test_poster_only_dir_is_candidate(self) -> None:
+        # 整理后常见的残留：片子走了，海报和旧 nfo 还在
+        leftover = self.tmp / "只剩海报 (2021)"
+        leftover.mkdir()
+        (leftover / "poster.jpg").write_bytes(b"y" * 100)
+        found = cleanup.scan(self.tmp)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].file_count, 1)
+        self.assertTrue(found[0].removable)
+
+    def test_tagged_dir_with_video_is_blocked(self) -> None:
+        # 名字带 _空壳待删 但里面真有视频：宁可漏删也不能删片
+        risky = self.tmp / "阿凡达 Collection_空壳待删"
+        risky.mkdir()
+        (risky / "avatar.mkv").write_bytes(b"x")
+        found = cleanup.scan(self.tmp)
+        self.assertEqual(len(found), 1)
+        self.assertFalse(found[0].removable)
+        result = cleanup.remove(found)
+        self.assertEqual(result.ok, 0)
+        self.assertTrue((risky / "avatar.mkv").exists())
+
+    def test_nested_empty_removed(self) -> None:
+        keeper = self.tmp / "合集 Collection"
+        (keeper / "第一部 (2001)").mkdir(parents=True)
+        (keeper / "第二部 (2003)").mkdir(parents=True)
+        (keeper / "第二部 (2003)" / "b.mkv").write_bytes(b"x")
+        found = cleanup.scan(self.tmp)
+        names = sorted(c.path.name for c in found)
+        self.assertEqual(names, ["第一部 (2001)"])
+        result = cleanup.remove(found)
+        self.assertEqual(result.ok, 1)
+        self.assertFalse((keeper / "第一部 (2001)").exists())
+        self.assertTrue((keeper / "第二部 (2003)" / "b.mkv").exists())
+
+    def test_remove_deletes_leftover_files(self) -> None:
+        leftover = self.tmp / "空壳 Collection_空壳待删"
+        leftover.mkdir()
+        (leftover / "poster.jpg").write_bytes(b"y")
+        found = cleanup.scan(self.tmp)
+        result = cleanup.remove(found)
+        self.assertEqual(result.ok, 1)
+        self.assertFalse(leftover.exists())
+
+    def test_missing_root_is_safe(self) -> None:
+        self.assertEqual(cleanup.scan(self.tmp / "不存在"), [])
 
 
 if __name__ == "__main__":

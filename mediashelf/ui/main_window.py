@@ -30,12 +30,20 @@ from PySide6.QtWidgets import (
 )
 
 from .. import apply as apply_mod
+from .. import cleanup as cleanup_mod
 from .. import config as cfg
 from .. import naming, organizer
 from .. import nfo as nfo_mod
 from ..tmdb import TMDBClient
-from .dialogs import MatchDialog, PreviewDialog, ResidualDialog, SettingsDialog
-from .workers import ApplyWorker, IdentifyWorker, KeyCheckWorker, ScanWorker
+from .dialogs import MatchDialog, PreviewDialog, ResidualDialog, SettingsDialog, ShellDialog
+from .workers import (
+    ApplyWorker,
+    CleanApplyWorker,
+    CleanScanWorker,
+    IdentifyWorker,
+    KeyCheckWorker,
+    ScanWorker,
+)
 
 COLUMNS = ["", "文件", "大小", "中文名", "英文名", "年份", "片源", "发布组", "新文件名", "状态"]
 COL_CHECK, COL_FILE, COL_SIZE, COL_CN, COL_EN, COL_YEAR, COL_SRC, COL_GROUP, COL_NEW, COL_STATUS = (
@@ -102,10 +110,16 @@ class MainWindow(QMainWindow):
         self.settings_btn = QPushButton("设置")
         self.settings_btn.clicked.connect(self.open_settings)
 
+        # 凭据状态就放在「设置」左边：一眼能看到能不能联网识别，点一下直接进设置
+        self.key_badge = QPushButton("● TMDB 检测中")
+        self.key_badge.setCursor(Qt.PointingHandCursor)
+        self.key_badge.setFlat(True)
+        self.key_badge.clicked.connect(self.open_settings)
+
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("媒体目录"))
         row1.addWidget(self.dir_label, 1)
-        for btn in (pick_btn, self.scan_btn, self.identify_btn, self.settings_btn):
+        for btn in (pick_btn, self.scan_btn, self.identify_btn, self.key_badge, self.settings_btn):
             row1.addWidget(btn)
         layout.addLayout(row1)
 
@@ -203,9 +217,12 @@ class MainWindow(QMainWindow):
         self.undo_btn.clicked.connect(self.undo_last)
         check_all = QPushButton("全选/全不选")
         check_all.clicked.connect(self.toggle_all)
+        self.clean_btn = QPushButton("清理空目录")
+        self.clean_btn.setToolTip("删掉整理后留下的空文件夹和「空壳待删」目录，不碰正片")
+        self.clean_btn.clicked.connect(self.clean_shells)
 
         row4 = QHBoxLayout()
-        for btn in (self.preview_btn, self.match_btn, self.nfo_btn, check_all):
+        for btn in (self.preview_btn, self.match_btn, self.nfo_btn, check_all, self.clean_btn):
             row4.addWidget(btn)
         row4.addStretch(1)
         for btn in (self.del_nfo_btn, self.undo_btn):
@@ -259,33 +276,45 @@ class MainWindow(QMainWindow):
             self.log_view.appendPlainText(f"{' ' * 11}{extra}")
 
     def _refresh_key_state(self) -> None:
-        key = self.config.get("tmdb_key", "")
+        key = self.config.get("tmdb_key", "").strip()
         self.identify_btn.setEnabled(True)
         self.identify_btn.setToolTip(
             "使用 TMDB 抓取完整元数据"
             if key
             else "未配置 TMDB，使用 Wikidata 兜底（只有中英文名/年份）"
         )
-        ffprobe = cfg.find_ffprobe(self.config.get("ffprobe", ""))
-        color = ""
-        if key:
-            if self._key_state == "ok":
-                source = "TMDB（已连接）"
-                color = "#1a7f37"
-            elif self._key_state == "fail":
-                source = f"TMDB（不可用：{self._key_error or '验证失败'}）"
-                color = "#cf222e"
-            elif self._key_state == "checking":
-                source = "TMDB（验证中…）"
-            else:
-                source = "TMDB（未验证）"
+
+        # 工具栏徽标：这是给用户看的主状态
+        if not key:
+            badge, color = "● TMDB 未配置", "#6e7781"
+            tip = "没有凭据，联网识别会退回 Wikidata（只有中英文名和年份）。点这里配置。"
+        elif self._key_state == "ok":
+            badge, color = "● TMDB 已连接", "#1a7f37"
+            tip = "凭据验证通过，可正常抓取元数据"
+        elif self._key_state == "fail":
+            badge, color = "● TMDB 不可用", "#cf222e"
+            tip = self._key_error or "凭据验证失败，点这里重新测试"
+        elif self._key_state == "checking":
+            badge, color = "● TMDB 验证中", "#9a6700"
+            tip = "正在连接 TMDB…"
         else:
-            source = "Wikidata（免 Key，命中率低）"
-            color = "#bc4c00"
-        text = f"ffprobe: {'已找到' if ffprobe else '未找到'}　|　数据源: {source}"
-        self.field_summary.setText(text)
-        self.field_summary.setToolTip(text)
-        self.field_summary.setStyleSheet(f"color: {color};" if color else "")
+            badge, color = "● TMDB 未验证", "#6e7781"
+            tip = "点这里打开设置并测试凭据"
+        self.key_badge.setText(badge)
+        self.key_badge.setStyleSheet(
+            f"QPushButton {{ color: {color}; border: none; background: transparent;"
+            " padding: 2px 6px; }"
+            f"QPushButton:hover {{ color: {color}; text-decoration: underline; }}"
+        )
+        self.key_badge.setToolTip(_wrap_text(tip)[0])
+
+        ffprobe = cfg.find_ffprobe(self.config.get("ffprobe", ""))
+        summary = f"ffprobe: {'已找到' if ffprobe else '未找到'}"
+        if not ffprobe:
+            summary += "（影响分辨率/编码探测，可用 winget install Gyan.FFmpeg 安装）"
+        self.field_summary.setText(summary)
+        self.field_summary.setToolTip(summary)
+        self.field_summary.setStyleSheet("" if ffprobe else "color: #cf222e;")
 
     def _verify_key(self) -> None:
         """启动和改完设置时验一次凭据，把结果显示在界面右下角。"""
@@ -415,6 +444,9 @@ class MainWindow(QMainWindow):
         self.log(f"扫描完成，共 {count} 个视频文件")
         self._status(f"扫描完成：{count} 个文件")
         self.refresh_all_previews()
+        if getattr(self, "_pending_clean", False):
+            self._pending_clean = False
+            self.clean_shells(auto=True)
 
     def _on_progress(self, done: int, total: int, name: str) -> None:
         self.progress.setRange(0, max(total, 1))
@@ -728,7 +760,68 @@ class MainWindow(QMainWindow):
         )
         self._handle_residuals(getattr(report, "residuals", []))
         if report.ok:
+            # 搬完之后必定留下一批空目录，扫完自动清一遍，不用用户再去 NAS 手动删
+            self._pending_clean = True
             self.scan()
+
+    # -------------------------------------------------------------- 清理空目录
+    def clean_shells(self, auto: bool = False) -> None:
+        """找空目录。auto=True 时只静默删完全空的，带文件的留给用户确认。"""
+        if not self.root or not self.root.exists():
+            if not auto:
+                QMessageBox.information(self, "先选目录", "先选择一个媒体目录。")
+            return
+        self._clean_auto = auto
+        self.log("执行后复查空目录…" if auto else "正在查找空目录…")
+        self._status("正在查找空目录…")
+        self.clean_scan = CleanScanWorker(self.root, int(self.config.get("probe_workers", 4) or 4))
+        self.clean_scan.scanned.connect(self._on_shells_scanned)
+        self.clean_scan.start()
+
+    def _on_shells_scanned(self, candidates: list) -> None:
+        auto = getattr(self, "_clean_auto", False)
+        self._clean_auto = False
+        if not candidates:
+            self.log("没有空目录")
+            self._status("没有空目录")
+            return
+
+        if auto:
+            empty_only = [c for c in candidates if not c.files]
+            with_files = [c for c in candidates if c.files]
+            if empty_only:
+                result = cleanup_mod.remove(empty_only)
+                self.log(
+                    f"自动清理空目录：删除 {result.ok} 个"
+                    + (f"，失败 {len(result.failed)} 个" if result.failed else "")
+                )
+                for path, error in result.failed[:5]:
+                    self.log(f"  失败 {path.name}：{error}")
+            if with_files:
+                self.log(f"另有 {len(with_files)} 个目录里还有残留文件，点「清理空目录」确认")
+            self._status("空目录已清理")
+            return
+
+        dialog = ShellDialog(candidates, self.root, parent=self)
+        if dialog.exec() != ShellDialog.Accepted:
+            self.log(f"空目录：{len(candidates)} 个，取消删除")
+            return
+        chosen = dialog.selected()
+        if not chosen:
+            return
+        self.log(f"正在删除 {len(chosen)} 个空目录…")
+        self.clean_apply = CleanApplyWorker(chosen)
+        self.clean_apply.done.connect(self._on_shells_removed)
+        self.clean_apply.start()
+
+    def _on_shells_removed(self, result) -> None:
+        self.log(
+            f"空目录：删除 {result.ok} 个"
+            + (f"，失败 {len(result.failed)} 个" if result.failed else "")
+        )
+        for path, error in result.failed[:5]:
+            self.log(f"  失败 {path.name}：{error}")
+        self._status(f"已删除 {result.ok} 个空目录")
 
     def _handle_residuals(self, residuals: list[dict]) -> None:
         """片子搬走了，原目录里剩下的海报/旧 nfo/样片交给用户决定。"""
