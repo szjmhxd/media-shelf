@@ -294,6 +294,22 @@ def detect_edition(raw: str) -> str:
     return ""
 
 
+def normalize_collection(name: str) -> str:
+    """把 TMDB 五花八门的合集名归一。
+
+    同一个系列，TMDB 可能给「海扁王（系列）」，也可能给「海扁王 Collection」，
+    直接拿名字拼目录就会变成两个文件夹，一个有片一个空着。
+    """
+    text = (name or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s*[（(]\s*(?:系列|合集|全集|collection|series)\s*[)）]", "", text, flags=re.I)
+    text = re.sub(r"\b(collection|series|franchise)\b", "", text, flags=re.I)
+    text = re.sub(r"(系列|合集|全集)$", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" -_·:")
+
+
 def detect_group(raw: str) -> str:
     """取最后一个 `-` 后面的发布组，过滤掉常见误判。"""
     stem = Path(raw).stem

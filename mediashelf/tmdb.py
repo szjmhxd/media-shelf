@@ -72,7 +72,7 @@ class TMDBClient:
             try:
                 resp = self.session.get(API + path, params=params, timeout=TIMEOUT)
             except requests.RequestException as exc:
-                last_error = f"网络错误：{exc}"
+                last_error = f"网络错误：{short_error(exc)}"
                 time.sleep(1.0 + attempt)
                 continue
 
@@ -221,13 +221,36 @@ def _english_title(data: dict[str, Any], original: str) -> str:
     return original
 
 
+def short_error(message: str) -> str:
+    """把 requests 的长报错压成一句人话。
+
+    `HTTPConnectionPool(host='api.themoviedb.org', port=443): Max retries exceeded
+    with url: /search/movie?query=... (Caused by ConnectTimeoutError(...))`
+    这种文本有几百字符，直接显示会把界面撑变形。
+    """
+    text = str(message or "")
+    low = text.lower()
+    if "timed out" in low or "timeout" in low:
+        return "连接超时，检查网络或代理"
+    if "max retries" in low or "connection" in low or "connectionerror" in low:
+        return "无法连接，检查网络或代理"
+    if "401" in text:
+        return "Key 无效（401）"
+    if "429" in text:
+        return "被限流（429），稍后再试"
+    if "404" in text:
+        return "接口不存在（404）"
+    text = text.strip().splitlines()[0] if text.strip() else "未知错误"
+    return text[:40]
+
+
 def test_key(api_key: str) -> tuple[bool, str]:
     """设置界面用：验证凭据是否可用。"""
     try:
         client = TMDBClient(api_key)
         results = client.search("Avatar", "2009")
     except TMDBError as exc:
-        return False, str(exc)
+        return False, short_error(exc)
     if results:
         return True, f"连接正常，示例结果：{results[0]['cn']}（{results[0]['year']}）"
     return True, "连接正常，但示例搜索无结果"

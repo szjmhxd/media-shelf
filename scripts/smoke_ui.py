@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from mediashelf import config as cfg  # noqa: E402
+from mediashelf import tmdb as tmdb_mod  # noqa: E402
 from mediashelf.ui.dialogs import PreviewDialog, _merge_by_owner  # noqa: E402
 from mediashelf.ui.main_window import MainWindow  # noqa: E402
 
@@ -93,6 +94,22 @@ def main() -> int:
     dialog.search.setText("不存在的片名")
     assert dialog.table.isRowHidden(0), "搜索应能过滤掉不匹配的行"
     dialog.deleteLater()
+
+    # 没开代理时的报错有几百字符，不能把窗口撑变形
+    long_error = (
+        "HTTPConnectionPool(host='api.themoviedb.org', port=443): Max retries exceeded with url: "
+        "/search/movie?query=%E9%98%BF%E5%87%A1%E8%BE%BE&language=zh-CN "
+        "(Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x1>, "
+        "'Connection to api.themoviedb.org timed out. (connect timeout=20)'))"
+    )
+    window.config.set("tmdb_key", "layout-test-key")
+    window._on_key_checked(False, tmdb_mod.short_error(long_error))
+    window.log(long_error)
+    app.processEvents()
+    width = window.minimumSizeHint().width()
+    print("错误信息最长时的窗口最小宽度:", width)
+    assert width <= 900, f"长错误把窗口撑到 {width}px"
+    assert "不可用" in window.field_summary.text(), window.field_summary.text()
 
     window.close()
     print("界面接线正常")

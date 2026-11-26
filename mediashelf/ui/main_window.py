@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -33,7 +34,7 @@ from .. import config as cfg
 from .. import naming, organizer
 from .. import nfo as nfo_mod
 from ..tmdb import TMDBClient
-from .dialogs import MatchDialog, PreviewDialog, SettingsDialog
+from .dialogs import MatchDialog, PreviewDialog, ResidualDialog, SettingsDialog
 from .workers import ApplyWorker, IdentifyWorker, KeyCheckWorker, ScanWorker
 
 COLUMNS = ["", "文件", "大小", "中文名", "英文名", "年份", "片源", "发布组", "新文件名", "状态"]
@@ -177,6 +178,9 @@ class MainWindow(QMainWindow):
 
         self.field_summary = QLabel("")
         self.field_summary.setObjectName("hintLabel")
+        # 数据源状态里可能带错误原因，长文本会把整行撑宽，进而把窗口拉变形。
+        # Ignored 让标签不参与最小宽度计算，超出部分裁掉，全文放 tooltip。
+        self.field_summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         row3 = QHBoxLayout()
         for box in (self.organize_check, self.collection_check, self.nfo_check, self.image_check):
@@ -221,6 +225,11 @@ class MainWindow(QMainWindow):
         self.log_view.setMaximumBlockCount(2000)
         self.log_view.setFixedHeight(118)
         self.log_view.setFont(QFont("Consolas", 9))
+        # 长 URL 在 Qt 里不会自动断行（只在空白处折），会把整个窗口的
+        # 最小宽度顶到屏幕外。关掉自动换行、关掉横向滚动条，写入时自己折。
+        self.log_view.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.log_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.log_view.setMinimumWidth(120)
         layout.addWidget(self.log_view)
 
         self.setCentralWidget(central)
@@ -244,7 +253,10 @@ class MainWindow(QMainWindow):
 
     def log(self, text: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
-        self.log_view.appendPlainText(f"[{stamp}] {text}")
+        lines = _wrap_text(str(text))
+        self.log_view.appendPlainText(f"[{stamp}] {lines[0]}")
+        for extra in lines[1:]:
+            self.log_view.appendPlainText(f"{' ' * 11}{extra}")
 
     def _refresh_key_state(self) -> None:
         key = self.config.get("tmdb_key", "")
@@ -270,9 +282,9 @@ class MainWindow(QMainWindow):
         else:
             source = "Wikidata（免 Key，命中率低）"
             color = "#bc4c00"
-        self.field_summary.setText(
-            f"ffprobe: {'已找到' if ffprobe else '未找到'}　|　数据源: {source}"
-        )
+        text = f"ffprobe: {'已找到' if ffprobe else '未找到'}　|　数据源: {source}"
+        self.field_summary.setText(text)
+        self.field_summary.setToolTip(text)
         self.field_summary.setStyleSheet(f"color: {color};" if color else "")
 
     def _verify_key(self) -> None:
@@ -696,7 +708,7 @@ class MainWindow(QMainWindow):
     def _run_ops(self, ops) -> None:
         client = self._client if any(op.kind == "download" for op in ops) else None
         self.progress.setRange(0, len(ops))
-        self.worker = ApplyWorker(ops, client)
+        self.worker = ApplyWorker(ops, client, root=self.root)
         self.worker.progress.connect(self._on_progress)
         self.worker.done.connect(self._apply_done)
         self.worker.start()
@@ -714,8 +726,31 @@ class MainWindow(QMainWindow):
             "执行结果",
             f"成功 {len(report.ok)} 条，失败 {len(report.failed)} 条。\n日志已保存到：\n{report.log_path}",
         )
+        self._handle_residuals(getattr(report, "residuals", []))
         if report.ok:
             self.scan()
+
+    def _handle_residuals(self, residuals: list[dict]) -> None:
+        """片子搬走了，原目录里剩下的海报/旧 nfo/样片交给用户决定。"""
+        if not residuals:
+            return
+        dialog = ResidualDialog(residuals, self)
+        if dialog.exec() != ResidualDialog.Accepted:
+            self.log(f"原目录残留：{len(residuals)} 个目录，保留不动")
+            return
+        chosen = dialog.selected()
+        if not chosen:
+            return
+        if dialog.action == "move":
+            ok, errors = apply_mod.move_residuals(chosen)
+            self.log(f"残留文件：移动 {ok} 个，跳过 {len(errors)} 个")
+            for error in errors[:5]:
+                self.log(f"  {error}")
+        elif dialog.action == "delete":
+            ok, errors = apply_mod.delete_residuals(chosen)
+            self.log(f"残留文件：删除 {ok} 个，失败 {len(errors)} 个")
+            for error in errors[:5]:
+                self.log(f"  {error}")
 
     def delete_nfo(self) -> None:
         if not self.root:
@@ -774,6 +809,17 @@ def _open_folder(path: Path) -> None:
     from PySide6.QtGui import QDesktopServices
 
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+
+def _wrap_text(text: str, width: int = 96) -> list[str]:
+    """按字符硬折行。Qt 只在空格处折，带 URL 的长句会撑破窗口。"""
+    out: list[str] = []
+    for raw in (text or "").splitlines() or [""]:
+        while len(raw) > width:
+            out.append(raw[:width])
+            raw = raw[width:]
+        out.append(raw)
+    return out or [""]
 
 
 def _human_size(size: int) -> str:

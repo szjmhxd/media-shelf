@@ -90,6 +90,24 @@ def sidecars(video: Path) -> list[Path]:
     return sorted(out)
 
 
+def _collection_dir(name: str, collection_id, suffix: str, cache: dict[str, str]) -> str:
+    """一个系列只能有一个目录。
+
+    先按 TMDB 的 collection id 匹配，id 缺失时退回归一化片名；
+    两者都命中不了才新建。否则同一系列会因为 TMDB 返回
+    「海扁王（系列）」和「海扁王 Collection」两种写法拆成两个文件夹。
+    """
+    keys = [f"id:{collection_id}"] if collection_id else []
+    keys.append(f"name:{name.lower()}")
+    for key in keys:
+        if key in cache:
+            return cache[key]
+    folder = f"{name} {suffix}".strip()
+    for key in keys:
+        cache[key] = folder
+    return folder
+
+
 def build_plan(
     records: list[dict],
     root: Path,
@@ -108,6 +126,8 @@ def build_plan(
     """
     ops: list[Op] = []
     taken: dict[str, str] = {}
+    # collection_id / 归一化名 → 目录名。同一系列只允许一个目录。
+    collection_dirs: dict[str, str] = {}
 
     for record in records:
         if not record.get("checked", True):
@@ -123,9 +143,15 @@ def build_plan(
         if organize:
             folder_name = naming.render_folder(record, folder_template)
             target_dir = root / folder_name
-            collection = (meta.get("collection") or "").strip()
+            collection = naming.normalize_collection(meta.get("collection") or "")
             if group_collections and collection:
-                target_dir = root / f"{collection} {collection_suffix}".strip() / folder_name
+                target_dir = (
+                    root
+                    / _collection_dir(
+                        collection, meta.get("collection_id"), collection_suffix, collection_dirs
+                    )
+                    / folder_name
+                )
         else:
             target_dir = video.parent
 

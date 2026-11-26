@@ -140,12 +140,12 @@ class KeyCheckWorker(QThread):
         self.key = key
 
     def run(self) -> None:  # noqa: D102
-        from ..tmdb import test_key
+        from ..tmdb import short_error, test_key
 
         try:
             ok, message = test_key(self.key)
         except Exception as exc:  # noqa: BLE001 - 验证失败也要把原因显示出来
-            ok, message = False, str(exc)
+            ok, message = False, short_error(exc)
         self.checked.emit(ok, message)
 
 
@@ -183,7 +183,9 @@ class IdentifyWorker(QThread):
                     pending += 1
                     reason = _reason(exc)
                     self.row_updated.emit(index - 1, {}, reason)
-                    self.failed.emit(f"{Path(record['path']).name}：{reason}（{exc}）")
+                    # 不要把异常全文写进日志：requests 的报错里带着完整 URL 和连接细节，
+                    # 一行几百字符，几十行就会把日志区撑到屏幕外。
+                    self.failed.emit(f"{Path(record['path']).name}：{reason}")
         finally:
             try:
                 self.client.save_cache()
@@ -273,10 +275,11 @@ class ApplyWorker(QThread):
     progress = Signal(int, int, str)
     done = Signal(object)
 
-    def __init__(self, ops, client=None) -> None:
+    def __init__(self, ops, client=None, root: Path | None = None) -> None:
         super().__init__()
         self.ops = ops
         self.client = client
+        self.root = root
         self._stop = False
 
     def stop(self) -> None:
@@ -290,5 +293,6 @@ class ApplyWorker(QThread):
             client=self.client,
             progress=lambda done, total, op: self.progress.emit(done, total, op.note or op.kind),
             stop_flag=lambda: self._stop,
+            root=self.root,
         )
         self.done.emit(report)

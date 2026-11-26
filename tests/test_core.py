@@ -163,6 +163,32 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(target.parent.parent.name, "阿凡达 Collection")
         self.assertTrue(moves[1].dst.endswith(".zh.ass"))
 
+    def test_collection_name_variants_merge(self) -> None:
+        """同一系列在 TMDB 可能叫「海扁王（系列）」也可能叫「海扁王 Collection」，
+        拼目录时必须落到同一个文件夹，否则会出现一个空目录 + 一个有片目录。"""
+        self.assertEqual(naming.normalize_collection("海扁王（系列）"), "海扁王")
+        self.assertEqual(naming.normalize_collection("海扁王 Collection"), "海扁王")
+        self.assertEqual(naming.normalize_collection("Kick-Ass Collection"), "Kick-Ass")
+
+        second = self.root / "海扁王2 (2013).mkv"
+        second.write_bytes(b"0" * 512)
+        other = _record(str(second))
+        other["meta"].update({"cn": "海扁王2", "year": "2013", "collection": "海扁王 Collection"})
+        self.record["meta"]["collection"] = "海扁王（系列）"
+        self.record["meta"]["collection_id"] = "2344"
+        other["meta"]["collection_id"] = "2344"
+
+        ops = organizer.build_plan(
+            [self.record, other],
+            self.root,
+            template="{cn} ({year})",
+            folder_template="{cn} ({year})",
+            group_collections=True,
+            write_nfo=False,
+        )
+        dirs = {Path(op.dst).parent.parent.name for op in ops if op.kind == "move"}
+        self.assertEqual(dirs, {"海扁王 Collection"}, f"合集目录不唯一：{dirs}")
+
     def test_unchecked_skipped(self) -> None:
         self.record["checked"] = False
         ops = organizer.build_plan(
@@ -216,6 +242,57 @@ class PlanTest(unittest.TestCase):
             self.assertTrue(self.video.exists())
             self.assertEqual(restored, 2)  # 视频 + 同名字幕
             self.assertGreaterEqual(removed, 1)
+
+    def test_residuals_detected_after_move(self) -> None:
+        """片子搬走后，原目录里的海报/旧 nfo/样片要被识别出来交给用户处理。"""
+        folder = self.root / "阿凡达 (2009)"
+        folder.mkdir()
+        video = folder / "阿凡达 (2009).mkv"
+        video.write_bytes(b"0" * 1024)
+        (folder / "poster.jpg").write_bytes(b"jpg")
+        (folder / "movie.nfo").write_text("<movie/>", encoding="utf-8")
+        (folder / "sample.mkv").write_bytes(b"0" * 2048)
+
+        record = _record(str(video))
+        record["meta"].update({"cn": "阿凡达", "year": "2009", "collection": "阿凡达"})
+        ops = organizer.build_plan(
+            [record],
+            self.root,
+            template="{cn} ({year})",
+            folder_template="{cn} ({year})",
+            write_nfo=False,
+            download_images=False,
+        )
+        with tempfile.TemporaryDirectory() as fake_appdata:
+            os.environ["APPDATA"] = fake_appdata
+            os.environ["XDG_CONFIG_HOME"] = fake_appdata
+            report = apply_mod.execute(ops, root=self.root)
+
+        self.assertEqual(len(report.residuals), 1, report.residuals)
+        names = {name for name, _size in report.residuals[0]["files"]}
+        self.assertEqual(names, {"poster.jpg", "movie.nfo", "sample.mkv"})
+
+        # 一起移走后原目录应该干净
+        moved, errors = apply_mod.move_residuals(report.residuals)
+        self.assertEqual(errors, [])
+        self.assertEqual(moved, 3)
+        self.assertEqual(list(folder.iterdir()), [])
+
+    def test_root_level_move_makes_no_residual(self) -> None:
+        """片子直接平铺在库根目录时，根目录本来就要保留，不该报残留。"""
+        with tempfile.TemporaryDirectory() as fake_appdata:
+            os.environ["APPDATA"] = fake_appdata
+            os.environ["XDG_CONFIG_HOME"] = fake_appdata
+            ops = organizer.build_plan(
+                [self.record],
+                self.root,
+                template="{cn} ({year})",
+                folder_template="{cn} ({year})",
+                write_nfo=False,
+                download_images=False,
+            )
+            report = apply_mod.execute(ops, root=self.root)
+        self.assertEqual(report.residuals, [])
 
 
 if __name__ == "__main__":

@@ -388,3 +388,111 @@ class PreviewDialog(QDialog):
         needle = text.strip().lower()
         for index, hay in enumerate(self._haystack):
             self.table.setRowHidden(index, bool(needle) and needle not in hay)
+
+
+class ResidualDialog(QDialog):
+    """视频被移走后，原目录里剩下的文件怎么处理。
+
+    真实的库里，一部片移走后目录里往往还留着 poster.jpg、旧的 movie.nfo、
+    sample.mkv 或者没识别出来的另一个版本。这些要么跟着走、要么删掉，
+    留在原地只会让刮削器认错。
+    """
+
+    def __init__(self, residuals: list[dict], parent=None) -> None:
+        super().__init__(parent)
+        self.residuals = residuals
+        self.action = "keep"
+        self.setWindowTitle("原目录还有文件")
+        self.resize(780, 470)
+
+        total_files = sum(len(item["files"]) for item in residuals)
+        total_size = sum(size for item in residuals for _name, size in item["files"])
+
+        title = QLabel(
+            f"{len(residuals)} 个原目录的电影已移走，目录里还剩 {total_files} 个文件"
+            f"（{_fmt_size(total_size)}）"
+        )
+        title.setObjectName("titleLabel")
+        title.setWordWrap(True)
+
+        hint = QLabel("勾选要一起处理的目录。下面是海报、旧 nfo、样片或没识别的其他视频：")
+        hint.setWordWrap(True)
+        hint.setObjectName("hintLabel")
+
+        self.list = QListWidget()
+        for item in residuals:
+            names = [name for name, _size in item["files"]]
+            size = sum(value for _name, value in item["files"])
+            summary = "、".join(names[:4]) + ("…" if len(names) > 4 else "")
+            row = QListWidgetItem(
+                f"{item['src_dir']}\n    {summary}（{len(names)} 个，{_fmt_size(size)}）"
+            )
+            row.setFlags(row.flags() | Qt.ItemIsUserCheckable)
+            row.setCheckState(Qt.Checked)
+            row.setToolTip(
+                "\n".join(f"{name}  {_fmt_size(value)}" for name, value in item["files"])
+            )
+            self.list.addItem(row)
+
+        move_btn = QPushButton("一起移到新目录")
+        delete_btn = QPushButton("删除这些文件")
+        keep_btn = QPushButton("保留不动")
+        move_btn.clicked.connect(self._choose_move)
+        delete_btn.clicked.connect(self._choose_delete)
+        keep_btn.clicked.connect(self.reject)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(keep_btn)
+        buttons.addStretch(1)
+        buttons.addWidget(move_btn)
+        buttons.addWidget(delete_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(title)
+        layout.addWidget(hint)
+        layout.addWidget(self.list, 1)
+        layout.addLayout(buttons)
+
+    def selected(self) -> list[dict]:
+        return [
+            item
+            for index, item in enumerate(self.residuals)
+            if self.list.item(index).checkState() == Qt.Checked
+        ]
+
+    def _choose_move(self) -> None:
+        if not self.selected():
+            QMessageBox.information(self, "没有选中", "先勾选要处理的目录。")
+            return
+        self.action = "move"
+        self.accept()
+
+    def _choose_delete(self) -> None:
+        chosen = self.selected()
+        if not chosen:
+            QMessageBox.information(self, "没有选中", "先勾选要处理的目录。")
+            return
+        count = sum(len(item["files"]) for item in chosen)
+        size = sum(value for item in chosen for _name, value in item["files"])
+        answer = QMessageBox.warning(
+            self,
+            "确认删除",
+            f"将删除 {count} 个文件，共 {_fmt_size(size)}。\n\n"
+            "NAS / 网络盘上删除不进回收站，误删无法恢复。\n"
+            "确认这些只是海报、旧 nfo 和样片，再继续。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self.action = "delete"
+            self.accept()
+
+
+def _fmt_size(size: int) -> str:
+    if not size:
+        return "0 B"
+    if size >= 1024**3:
+        return f"{size / 1024**3:.1f} GB"
+    if size >= 1024**2:
+        return f"{size / 1024**2:.0f} MB"
+    return f"{size / 1024:.0f} KB"
